@@ -3,6 +3,16 @@
 # Ports ouverts uniquement sur 127.0.0.1. Ne pas utiliser sur le VPS.
 
 services:
+  caddy:
+    # Remplace les ports 80/443 du fichier principal (souvent déjà pris en local).
+    ports: !override
+      - "127.0.0.1:${DEV_HTTPS_PORT:-8443}:443"
+
+  n8n:
+    environment:
+      N8N_EDITOR_BASE_URL: https://localhost:${DEV_HTTPS_PORT:-8443}/
+      WEBHOOK_URL: https://localhost:${DEV_HTTPS_PORT:-8443}/
+
   api:
     ports:
       - "127.0.0.1:8000:8000"

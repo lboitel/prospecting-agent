@@ -536,8 +536,10 @@ La qualité des prompts ne se teste pas avec ces tests unitaires : constituez un
 ```bash
 cp .env.example .env    # N8N_DOMAIN=localhost, secrets quelconques, vraie ANTHROPIC_API_KEY
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
-# n8n : https://localhost (certificat local Caddy), API : http://localhost:8000/docs
+# n8n : https://localhost:8443 (certificat local Caddy), API : http://localhost:8000/docs
 ```
+
+La surcouche publie uniquement sur `127.0.0.1` et évite les ports souvent déjà pris : n8n sur 8443 au lieu de 443 (80 n'est pas publié), Postgres sur 5433. Les variables `DEV_HTTPS_PORT` et `DEV_POSTGRES_PORT` du `.env` permettent d'en choisir d'autres.
 
 ### Modifier le schéma
 
