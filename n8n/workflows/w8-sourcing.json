@@ -1,0 +1,553 @@
+{
+  "id": "prospectW8Source",
+  "name": "W8 · Collecte de prospects (entreprises + Hunter)",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 8 * * 1-5"
+            }
+          ]
+        }
+      },
+      "id": "67146548-ad4b-54ab-acb2-003a8599fa7a",
+      "name": "Chaque matin (jours ouvrés)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.4,
+      "position": [
+        0,
+        -100
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "a99c0310-2fbd-5c58-9907-09571138eddf",
+      "name": "Lancer maintenant",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://api:8000/sourcing/run",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "max_companies",
+              "value": "10"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "aeef1a4d-4731-5d27-b5bf-a87f41c60991",
+      "name": "Ajouter des entreprises",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        240,
+        0
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "prospectApiCreds",
+          "name": "Prospecting API"
+        }
+      },
+      "onError": "continueErrorOutput",
+      "notes": "Critères dans playbook/sourcing.json. Crée les dirigeants au statut to_enrich."
+    },
+    {
+      "parameters": {
+        "chatId": "__TELEGRAM_CHAT_ID__",
+        "text": "={{ '🏢 *Collecte* : ' + $json.companies_created + ' entreprises, ' + $json.prospects_created + ' dirigeants ajoutés' + ($json.exhausted ? '\\n⚠️ Plus aucune entreprise pour ces critères : élargissez playbook/sourcing.json.' : '') }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "23a75638-01e4-51df-9ca2-696352691dba",
+      "name": "Rapport de collecte",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        480,
+        -100
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "prospectTelegram",
+          "name": "Telegram Prospection"
+        }
+      },
+      "webhookId": "5cff16df-349a-5078-9dca-9dd8b826def2"
+    },
+    {
+      "parameters": {
+        "chatId": "__TELEGRAM_CHAT_ID__",
+        "text": "={{ '❌ *Collecte impossible* : ' + String(($json.error?.message) ?? '').replace(/([_*`\\[])/g, '\\\\$1') }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "2011d273-63e5-5367-86cb-8bfbf1c8819e",
+      "name": "Signaler l'échec de collecte",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        480,
+        150
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "prospectTelegram",
+          "name": "Telegram Prospection"
+        }
+      },
+      "webhookId": "f1793e58-0017-5141-9134-e36a148a1417"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "http://api:8000/prospects",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "status",
+              "value": "to_enrich"
+            },
+            {
+              "name": "limit",
+              "value": "50"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "8655930d-49be-5225-90fc-882b9bd57f93",
+      "name": "Contacts à enrichir",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        720,
+        -100
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "prospectApiCreds",
+          "name": "Prospecting API"
+        }
+      },
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "id": "0bf89d4d-7293-5d43-9e92-447e57f542e7",
+      "name": "Un contact à la fois",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        960,
+        -100
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://api:8000/prospects/{{ $('Un contact à la fois').item.json.id }}/find-email",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 60000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "2ef11723-f391-543d-9240-03040960fb47",
+      "name": "Chercher l'email (Hunter)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1200,
+        0
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "prospectApiCreds",
+          "name": "Prospecting API"
+        }
+      },
+      "onError": "continueErrorOutput",
+      "notes": "Le plafond quotidien (sourcing.json) est appliqué par l'API : 429 = arrêt."
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "34ec999f-731f-5d5d-8fc6-03ffbacfd2bf",
+                    "leftValue": "={{ [200, 409].includes($json.statusCode) }}",
+                    "rightValue": "",
+                    "operator": {
+                      "type": "boolean",
+                      "operation": "true",
+                      "singleValue": true
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Contact suivant"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "6350248a-2deb-5f65-ab53-0cffd0583430",
+                    "leftValue": "={{ $json.statusCode }}",
+                    "rightValue": 429,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Plafond atteint"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "Erreur"
+        }
+      },
+      "id": "b05dc028-9d75-571f-916e-0c93a89b1609",
+      "name": "Selon la réponse",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        1440,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "__TELEGRAM_CHAT_ID__",
+        "text": "={{ '⚠️ Recherche d\\'email impossible pour le contact #' + $('Un contact à la fois').item.json.id + ' : ' + String(($json.body?.detail ?? $json.error?.message) ?? '').replace(/([_*`\\[])/g, '\\\\$1') }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "c6ea12f1-6eb5-5dc9-a8da-85fbd9e36207",
+      "name": "Signaler l'erreur Hunter",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1680,
+        150
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "prospectTelegram",
+          "name": "Telegram Prospection"
+        }
+      },
+      "webhookId": "ed8b3edc-956d-5141-8af7-ac2893c579c3"
+    },
+    {
+      "parameters": {},
+      "id": "47d7617e-b3cc-5acc-ac33-66c2e416b6dc",
+      "name": "Contact suivant",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1920,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "http://api:8000/sourcing/today",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "5f3a69b1-7c82-560a-84cb-cae3bbb676d4",
+      "name": "Bilan du jour",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1680,
+        -250
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "prospectApiCreds",
+          "name": "Prospecting API"
+        }
+      },
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "chatId": "__TELEGRAM_CHAT_ID__",
+        "text": "={{ '📧 *Emails du jour* : ' + ($json.lookups.found ?? 0) + ' trouvés, ' + ($json.lookups.not_found ?? 0) + ' introuvables, ' + ($json.lookups.rejected ?? 0) + ' peu fiables, ' + ($json.lookups.duplicate ?? 0) + ' doublons, ' + ($json.lookups.opted_out ?? 0) + ' opposés' + '\\nCrédits Hunter utilisés : ' + $json.credits_used + ' · recherches restantes aujourd\\'hui : ' + $json.lookups_left }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "8f4aba2b-d3b2-5d77-9f76-14b57f653845",
+      "name": "Envoyer le bilan",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1920,
+        -250
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "prospectTelegram",
+          "name": "Telegram Prospection"
+        }
+      },
+      "webhookId": "2fbde50d-acb5-5d4d-8051-c85808d5c964",
+      "executeOnce": true
+    }
+  ],
+  "connections": {
+    "Chaque matin (jours ouvrés)": {
+      "main": [
+        [
+          {
+            "node": "Ajouter des entreprises",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lancer maintenant": {
+      "main": [
+        [
+          {
+            "node": "Ajouter des entreprises",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ajouter des entreprises": {
+      "main": [
+        [
+          {
+            "node": "Rapport de collecte",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Signaler l'échec de collecte",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Rapport de collecte": {
+      "main": [
+        [
+          {
+            "node": "Contacts à enrichir",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Signaler l'échec de collecte": {
+      "main": [
+        [
+          {
+            "node": "Contacts à enrichir",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Contacts à enrichir": {
+      "main": [
+        [
+          {
+            "node": "Un contact à la fois",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Un contact à la fois": {
+      "main": [
+        [
+          {
+            "node": "Bilan du jour",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Chercher l'email (Hunter)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Chercher l'email (Hunter)": {
+      "main": [
+        [
+          {
+            "node": "Selon la réponse",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Signaler l'erreur Hunter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Selon la réponse": {
+      "main": [
+        [
+          {
+            "node": "Contact suivant",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Bilan du jour",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Signaler l'erreur Hunter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Signaler l'erreur Hunter": {
+      "main": [
+        [
+          {
+            "node": "Contact suivant",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Contact suivant": {
+      "main": [
+        [
+          {
+            "node": "Un contact à la fois",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Bilan du jour": {
+      "main": [
+        [
+          {
+            "node": "Envoyer le bilan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Paris",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "binaryMode": "separate",
+    "errorWorkflow": "prospectW0Errors"
+  },
+  "pinData": {},
+  "tags": [
+    {
+      "id": "prospectTagAgent",
+      "name": "prospection"
+    }
+  ],
+  "meta": {
+    "templateCredsSetupCompleted": true
+  }
+}

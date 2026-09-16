@@ -1,0 +1,16 @@
+{
+  "commentaire": "EXEMPLE à adapter. Codes NAF : https://www.insee.fr/fr/information/2406147 ; tranches d'effectif : 11 = 10-19, 12 = 20-49, 21 = 50-99 salariés. Voir docs/ARCHITECTURE.md § 8.",
+  "criteria": {
+    "activite_principale": ["62.01Z", "62.02A"],
+    "tranche_effectif_salarie": ["11", "12"],
+    "departement": ["69"]
+  },
+  "exclude_sole_proprietors": true,
+  "roles": ["Président", "Directeur général", "Gérant"],
+  "contacts_per_company": 1,
+  "email": {
+    "daily_lookups": 2,
+    "min_score": 70,
+    "accepted_verifications": ["valid"]
+  }
+}

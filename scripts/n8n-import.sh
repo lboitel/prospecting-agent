@@ -24,7 +24,7 @@ fi
 publish=false
 [[ "${1:-}" == "--publish" ]] && publish=true
 
-workflow_ids=(prospectW0Errors prospectW3Review prospectW1Import prospectW2Traite)
+workflow_ids=(prospectW0Errors prospectW3Review prospectW1Import prospectW2Traite prospectW8Source)
 tmp=/tmp/prospecting-import
 
 # Secrets et IDs de chat : jamais dans le dépôt, injectés au moment de l'import.
@@ -70,7 +70,7 @@ if $publish; then
   trap - EXIT
   # La publication par la CLI n'est prise en compte qu'au redémarrage.
   "${compose[@]}" restart n8n
-  echo "workflows importés et publiés (W2 tournera toutes les heures en jours ouvrés)"
+  echo "workflows importés et publiés (W8 à 8 h et W2 toutes les heures, en jours ouvrés)"
 else
   echo "workflows importés, non publiés : relancez avec --publish pour les activer"
 fi

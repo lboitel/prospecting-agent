@@ -55,6 +55,7 @@ services:
       DATABASE_URL: postgresql+psycopg://prospecting:${APP_DB_PASSWORD}@postgres:5432/prospecting
       API_KEY: ${API_KEY}
       OPENAI_API_KEY: ${OPENAI_API_KEY}
+      HUNTER_API_KEY: ${HUNTER_API_KEY:-}
       # Optionnel : autres modèles OpenAI (défauts : gpt-5.4-mini / gpt-5.4-nano)
       MODEL_WRITER: ${MODEL_WRITER:-gpt-5.4-mini}
       MODEL_CLASSIFIER: ${MODEL_CLASSIFIER:-gpt-5.4-nano}
@@ -96,7 +97,7 @@ networks:
   # Réseau sans accès Internet : Postgres n'est joignable que par n8n et l'API.
   internal:
     internal: true
-  # Accès sortant de l'API (API OpenAI, API Recherche d'entreprises).
+  # Accès sortant de l'API (API OpenAI, API Recherche d'entreprises, Hunter).
   egress:
 
 volumes:

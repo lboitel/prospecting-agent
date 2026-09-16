@@ -5,7 +5,7 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 from prospecting.llm.replies import ReplyCategory
-from prospecting.models import MessageStatus, ProspectStatus
+from prospecting.models import EmailLookupOutcome, MessageStatus, ProspectStatus
 
 
 class ProspectIn(BaseModel):
@@ -95,3 +95,25 @@ class OptOutIn(BaseModel):
 
 class OptOutCheck(BaseModel):
     opted_out: bool
+
+
+class SourcingReport(BaseModel):
+    companies_created: int
+    prospects_created: int
+    pages_read: int
+    exhausted: bool
+
+
+class FindEmailResult(BaseModel):
+    outcome: EmailLookupOutcome
+    # Absent si le prospect a été supprimé comme doublon.
+    prospect: ProspectOut | None
+    score: int | None
+    verification: str | None
+
+
+class SourcingToday(BaseModel):
+    lookups: dict[str, int]
+    lookups_left: int
+    credits_used: int
+    companies_created: int

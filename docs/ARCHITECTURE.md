@@ -26,7 +26,7 @@
 
 L'agent automatise la partie répétitive de la prospection B2B :
 
-1. importer des prospects (fichiers CSV, formulaire, CRM) ;
+1. collecter des prospects : import de fichiers CSV, ou **collecte automatique** des dirigeants d'entreprises ciblées puis recherche de leur email (Hunter) ;
 2. compléter les informations sur l'entreprise (SIREN, secteur, effectif) ;
 3. rechercher sur le web des faits récents sur le prospect et son entreprise ;
 4. qualifier le prospect par rapport au profil client idéal (ICP) ;
@@ -67,7 +67,8 @@ flowchart LR
     API --> PG
     PB --> API
     API -->|recherche, rédaction,<br/>classification| OpenAI["API OpenAI"]
-    API -->|SIREN, secteur| Sirene["API Recherche<br/>d'entreprises"]
+    API -->|entreprises cibles,<br/>dirigeants| Sirene["API Recherche<br/>d'entreprises"]
+    API -->|email des dirigeants| Hunter["API Hunter"]
 ```
 
 **Répartition des rôles :**
@@ -91,7 +92,10 @@ prospecting-agent/
 │   │   ├── models.py           Schéma de la base
 │   │   ├── schemas.py          Contrats d'entrée/sortie de l'API
 │   │   ├── services.py         Règles métier et transitions de statut
-│   │   ├── enrichment.py       API Recherche d'entreprises
+│   │   ├── enrichment.py       Complément d'une entreprise connue (SIREN, secteur)
+│   │   ├── sourcing.py         Critères, recherche d'entreprises, choix des dirigeants
+│   │   ├── hunter.py           Client Hunter (Email Finder)
+│   │   ├── collection.py       Collecte : entreprises → dirigeants → email
 │   │   ├── playbook.py         Lecture des fichiers playbook/
 │   │   ├── llm/
 │   │   │   ├── client.py       Client OpenAI, refus, journal des coûts
@@ -104,7 +108,7 @@ prospecting-agent/
 │   ├── Dockerfile
 │   └── pyproject.toml / uv.lock
 ├── n8n/workflows/              Workflows W0 à W3 (JSON importable)
-├── playbook/                   Offre, ICP, ton : éditables sans redéployer
+├── playbook/                   Offre, ICP, ton, critères de collecte : éditables sans redéployer
 ├── infra/
 │   ├── caddy/Caddyfile
 │   └── postgres/init/          Création des bases et des utilisateurs
@@ -169,6 +173,7 @@ erDiagram
     prospects ||--o{ research : "fait l'objet de"
     prospects ||--o{ messages : "échange"
     prospects ||--o{ llm_calls : "coûte"
+    prospects ||--o{ email_lookups : "recherche d'email"
 
     companies {
         int id
@@ -187,6 +192,7 @@ erDiagram
         string job_title
         string linkedin_url
         string source
+        string email_source
         string status
         int score
     }
@@ -221,15 +227,32 @@ erDiagram
         int cache_read_tokens
         int duration_ms
     }
+    email_lookups {
+        int id
+        string provider
+        string outcome
+        int score
+        string verification
+        bool credit_used
+    }
+    sourcing_cursors {
+        int id
+        string criteria_hash UK
+        json criteria
+        int next_page
+        bool exhausted
+    }
 ```
 
 Choix de modélisation :
 
-- **Email normalisé** (minuscules, sans espaces) et **unique** : c'est la clé de dédoublonnage des prospects.
+- **Email normalisé** (minuscules, sans espaces) et **unique** : c'est la clé de dédoublonnage des prospects. Il peut être vide pour un dirigeant collecté dont l'email n'a pas encore été trouvé.
 - **Entreprise** retrouvée par SIREN, puis par domaine (sans `www.`).
 - **Statuts en `VARCHAR`**, validés par l'application plutôt que par un type `ENUM` Postgres : ajouter un statut ne demande pas de migration.
 - **`opt_outs` ne contient qu'un hash HMAC-SHA256** de l'email (clé : `OPTOUT_SALT`). La liste d'opposition survit à la suppression du prospect sans conserver l'adresse en clair.
 - **`llm_calls` ne stocke pas les prompts**, seulement les métriques : pas de copie supplémentaire des données personnelles.
+- **`email_lookups` ne contient pas l'email trouvé**, seulement le résultat, le score, la vérification et la consommation d'un crédit : il sert au plafond quotidien et au suivi des crédits.
+- **`sourcing_cursors`** mémorise la page suivante pour chaque jeu de critères : la collecte reprend où elle s'était arrêtée, et repart de la première page si les critères changent.
 - **`messages.external_id` unique** : identifiant de l'outil d'envoi, utilisé pour ignorer les webhooks rejoués.
 
 ### 4.4 Caddy
@@ -244,7 +267,7 @@ Choix de modélisation :
 |---|---|---|
 | `edge` | Caddy, n8n | Oui (webhooks entrants, appels Telegram/lemlist) |
 | `internal` | n8n, API, Postgres | **Non** |
-| `egress` | API | Oui (API OpenAI, API Recherche d'entreprises) |
+| `egress` | API | Oui (API OpenAI, API Recherche d'entreprises, Hunter) |
 
 ---
 
@@ -255,6 +278,10 @@ Choix de modélisation :
 ```mermaid
 stateDiagram-v2
     [*] --> new : import / POST /prospects
+    [*] --> to_enrich : collecte (W8)
+    to_enrich --> new : email fiable trouvé
+    to_enrich --> no_email : introuvable ou peu fiable
+    to_enrich --> opted_out : email dans la liste d'opposition
     new --> processing : POST /process (verrou)
     researched --> processing : reprise après échec
     processing --> researched : échec de la rédaction
@@ -392,6 +419,9 @@ Toutes les routes, sauf `/health`, exigent l'en-tête `X-API-Key`. La documentat
 | POST | `/messages/{id}/reject` | Rejeter (le prospect passe en `disqualified`) | 409 |
 | POST | `/messages/{id}/sent` | Confirmer l'envoi (`external_id`) | 409 si non validé |
 | POST | `/replies` | Classer une réponse (`email`, `body`, `external_id`) → `category`, `summary`, `follow_up_date`, `notify_human`, `stop_sequence` | 502/503 |
+| POST | `/sourcing/run?max_companies=…` | Ajouter jusqu'à N entreprises cibles (critères de `playbook/sourcing.json`) et leurs dirigeants en `to_enrich` | 503 si l'API Recherche d'entreprises est indisponible |
+| POST | `/prospects/{id}/find-email` | Chercher l'email d'un dirigeant avec Hunter → `outcome` (`found`, `not_found`, `rejected`, `duplicate`, `opted_out`), `score`, `verification` | 409 si pas `to_enrich`, **429 si plafond quotidien ou quota Hunter atteint**, 502 clé ou requête refusée, 503 Hunter indisponible ou clé absente |
+| GET | `/sourcing/today` | Recherches du jour par résultat, crédits consommés, recherches restantes, entreprises ajoutées | — |
 | POST | `/opt-outs` | Ajouter à la liste d'opposition | 204 |
 | GET | `/opt-outs/check?email=…` | Vérifier une adresse | — |
 
@@ -412,7 +442,7 @@ Toutes les routes, sauf `/health`, exigent l'en-tête `X-API-Key`. La documentat
 
 ## 8. Workflows n8n
 
-Les workflows W0 à W3 sont versionnés dans [`n8n/workflows/`](../n8n/workflows/) et ciblent **n8n 2.39**. Ils ne contiennent aucun secret : l'identifiant du chat Telegram et les identifiants sont injectés à l'import. W4 à W7 restent à construire (§ 8.4).
+Les workflows W0 à W3 et W8 sont versionnés dans [`n8n/workflows/`](../n8n/workflows/) et ciblent **n8n 2.39**. Ils ne contiennent aucun secret : l'identifiant du chat Telegram et les identifiants sont injectés à l'import. W4 à W7 restent à construire (§ 8.5).
 
 ### 8.1 Canal : Telegram
 
@@ -432,10 +462,11 @@ Les textes dynamiques sont échappés pour le Markdown de Telegram (`_`, `*`, ``
 
 | # | Fichier | Déclencheur | Étapes |
 |---|---|---|---|
-| W0 | `w0-errors.json` | *Error Trigger* | Message Telegram : workflow, nœud, erreur, lien vers l'exécution. Défini comme *Error workflow* de W1 à W3. |
+| W0 | `w0-errors.json` | *Error Trigger* | Message Telegram : workflow, nœud, erreur, lien vers l'exécution. Défini comme *Error workflow* de tous les autres. |
 | W1 | `w1-import.json` | *Form Trigger* sur `/form/import-prospects`, **réservé aux utilisateurs connectés à n8n** | Fichier CSV + origine des contacts → `POST /prospects/import` → rapport sur Telegram (avec l'email de la personne) → page de fin avec le détail des lignes rejetées. En cas d'échec de l'API, page d'erreur. |
 | W2 | `w2-processing.json` | Toutes les heures de 9 h à 18 h, du lundi au vendredi (Europe/Paris), ou bouton *Lancer maintenant* | `GET /prospects?status=new&limit=10` → boucle, un prospect à la fois → `POST /enrich` (échec toléré) → `POST /process` (timeout 300 s) → selon le code HTTP : **200** → si un brouillon existe, lancer W3 sans attendre ; **409** (déjà traité ou en cours) → prospect suivant ; **autre / réseau** → alerte Telegram puis prospect suivant. |
 | W3 | `w3-review.json` | Appelé par W2 (reçoit le résultat de `/process`) | Message Telegram : prospect, score, raisons, objet, corps, sources, bouton *Relire et décider* → formulaire prérempli → `POST /messages/{id}/approve` (avec les corrections) ou `/reject` → confirmation sur Telegram. Refus de l'API (409 : contact désinscrit entre-temps) → alerte. Sans réponse sous **7 jours**, l'exécution se termine et le brouillon reste `draft`. |
+| W8 | `w8-sourcing.json` | Chaque jour ouvré à 8 h, ou bouton *Lancer maintenant* | `POST /sourcing/run?max_companies=10` → rapport Telegram → `GET /prospects?status=to_enrich` → boucle, un contact à la fois → `POST /prospects/{id}/find-email` → selon le code HTTP : **200 / 409** → contact suivant ; **429** (plafond ou quota) → arrêt ; **autre** → alerte puis contact suivant → bilan Telegram (`GET /sourcing/today`). Les prospects trouvés passent en `new` et sont traités par W2 dès 9 h. |
 
 **Chevauchements.** Si un lot de W2 dure plus d'une heure, le lot suivant peut récupérer les mêmes prospects. L'API les protège : `process` passe le prospect en `processing` de façon atomique, et le second appel reçoit un 409 sans rien facturer. Un prospect resté en `processing` plus de 15 minutes (conteneur redémarré en plein traitement) est de nouveau traitable.
 
@@ -445,16 +476,16 @@ Les textes dynamiques sont échappés pour le Markdown de Telegram (`_`, `*`, ``
 
 ```bash
 # 1. Pile démarrée et compte propriétaire n8n créé (première connexion à l'interface)
-# 2. TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID et API_KEY renseignés dans .env
+# 2. TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, API_KEY (et HUNTER_API_KEY pour W8) renseignés dans .env
 ./scripts/n8n-import.sh             # importe identifiants et workflows (non publiés)
-./scripts/n8n-import.sh --publish   # importe, publie les 4 workflows et redémarre n8n
+./scripts/n8n-import.sh --publish   # importe, publie les 5 workflows et redémarre n8n
 ```
 
 Le script :
 
 - crée ou met à jour les identifiants **Prospecting API** (*Header Auth*, `X-API-Key`) et **Telegram Prospection**, chiffrés par n8n ;
 - remplace `__TELEGRAM_CHAT_ID__` dans une copie temporaire des workflows, importe cette copie puis la supprime ;
-- conserve les IDs fixes des workflows (`prospectW0Errors`, `prospectW1Import`, `prospectW2Traite`, `prospectW3Review`) : W2 appelle W3 et tous signalent leurs erreurs à W0 par ces IDs ;
+- conserve les IDs fixes des workflows (`prospectW0Errors`, `prospectW1Import`, `prospectW2Traite`, `prospectW3Review`, `prospectW8Source`) : W2 appelle W3 et tous signalent leurs erreurs à W0 par ces IDs ;
 - avec `--publish`, publie aussi W0 et W3 : n8n n'exécute que la **version publiée** d'un sous-workflow ou d'un workflow d'erreur. La publication par la CLI demande un redémarrage de n8n, fait par le script.
 
 **Réimporter écrase** les workflows du même ID. Après une modification dans l'éditeur, exporter avant tout réimport :
@@ -465,7 +496,46 @@ docker compose cp n8n:/tmp/w2.json n8n/workflows/w2-processing.json
 # Remettre __TELEGRAM_CHAT_ID__ à la place de l'identifiant réel avant de commiter.
 ```
 
-### 8.4 Workflows à construire
+### 8.4 Collecte automatique (W8)
+
+**Principe.** L'API Recherche d'entreprises (gratuite, sans clé) fournit les entreprises actives qui correspondent aux critères, avec leurs **dirigeants déclarés au registre** (nom, prénoms, fonction). Pour chaque entreprise retenue, l'API garde le ou les dirigeants personnes physiques dont la fonction est recherchée. Hunter cherche ensuite leur email professionnel à partir du nom de l'entreprise, ou de son domaine s'il est connu. Le domaine renvoyé par Hunter est enregistré sur l'entreprise.
+
+**Réglages** dans `playbook/sourcing.json`, relu à chaque appel :
+
+| Clé | Rôle | Exemple |
+|---|---|---|
+| `criteria.activite_principale` | Codes NAF | `["62.01Z", "62.02A"]` |
+| `criteria.tranche_effectif_salarie` | Tranches INSEE : `11` = 10-19, `12` = 20-49, `21` = 50-99 salariés… | `["11", "12"]` |
+| `criteria.departement`, `region`, `code_postal` | Zone. Ces filtres portent sur **les établissements** : une entreprise dont le siège est ailleurs mais qui a un établissement dans la zone est retenue. | `["69"]` |
+| `criteria.categorie_entreprise`, `section_activite_principale`, `nature_juridique` | Autres filtres de l'API | `["PME"]` |
+| `exclude_sole_proprietors` | Exclure les entreprises individuelles | `true` |
+| `roles` | Fonctions recherchées par ordre de préférence (comparaison « contient », sans casse) | `["Président", "Directeur général", "Gérant"]` |
+| `contacts_per_company` | Dirigeants retenus par entreprise (1 à 5) | `1` |
+| `email.daily_lookups` | **Plafond de recherches Hunter par jour** (appliqué par l'API) | `2` |
+| `email.min_score` | Score Hunter minimal | `70` |
+| `email.accepted_verifications` | Statuts de vérification acceptés | `["valid"]` |
+
+**Crédits Hunter.** Un crédit n'est consommé que lorsqu'un email est trouvé, **même s'il est ensuite rejeté** (score trop faible, statut `accept_all` ou `unknown`). Avec le plan gratuit (50 crédits par mois), gardez `daily_lookups` à 2. Avec un plan payant, adaptez-le au quota mensuel divisé par le nombre de jours ouvrés. L'API renvoie 429 quand le plafond du jour ou le quota Hunter est atteint, et W8 s'arrête.
+
+**Fiabilité.** Par défaut, seuls les emails `valid` avec un score ≥ 70 sont acceptés, pour protéger la réputation du domaine d'envoi. Accepter `accept_all` (serveurs qui acceptent toute adresse) augmente le volume mais aussi les rebonds.
+
+**Résultats possibles** (`email_lookups.outcome`) :
+
+| Résultat | Effet sur le prospect |
+|---|---|
+| `found` | Email enregistré, `email_source = hunter`, statut `new` : W2 le traitera. |
+| `not_found` | Statut `no_email`, aucun crédit consommé. |
+| `rejected` | Statut `no_email`, crédit consommé, email **non conservé**. |
+| `duplicate` | L'email appartient déjà à un prospect (import CSV par exemple) : le contact collecté est supprimé, l'existant est conservé. |
+| `opted_out` | Email présent dans la liste d'opposition : statut `opted_out`, email non enregistré. Si Hunter répond 451 (la personne s'est opposée auprès de Hunter), le contact est **supprimé**. L'entreprise reste connue, la collecte ne le recréera donc pas. |
+
+**Ce que la collecte ne trouve pas :**
+
+- les entreprises dont le dirigeant est une société (holding) : aucune personne physique à contacter ;
+- les entreprises non diffusibles, exclues par l'API ;
+- les homonymes : Hunter cherche par nom d'entreprise et peut se tromper de domaine. L'email et l'entreprise sont affichés dans le message de validation (W3) : vérifiez-les avant de valider.
+
+### 8.5 Workflows à construire
 
 | # | Workflow | Déclencheur | Étapes |
 |---|---|---|---|
@@ -474,9 +544,9 @@ docker compose cp n8n:/tmp/w2.json n8n/workflows/w2-processing.json
 | W6 | **Désinscriptions** | *Webhook* « unsubscribed » de l'outil d'envoi | `POST /opt-outs`. |
 | W7 | **Relances « plus tard »** | *Schedule* quotidien | Prospects `not_now` dont la date est atteinte → alerte Telegram (décision humaine). |
 
-### 8.5 Bonnes pratiques
+### 8.6 Bonnes pratiques
 
-- **Un prospect à la fois** dans W2 : un échec n'arrête pas le lot, et les limites de débit de l'API OpenAI sont respectées.
+- **Un prospect à la fois** dans W2 et W8 : un échec n'arrête pas le lot, et les limites de débit d'OpenAI et de Hunter sont respectées.
 - **Pas de réessai automatique sur `/process`** : un 409 est normal, et un 502 (refus du modèle) se reproduirait. Les erreurs sont signalées sur Telegram.
 - **Sécuriser les webhooks** (W5, W6) : authentification par en-tête dans le nœud *Webhook*, avec le secret configuré côté lemlist/LGM.
 - **Noms de nœuds sans apostrophe** lorsqu'ils sont cités dans une expression (`$('Nom du nœud')`).
@@ -492,18 +562,19 @@ docker compose cp n8n:/tmp/w2.json n8n/workflows/w2-processing.json
 
 | Exigence | Mise en œuvre |
 |---|---|
-| Origine des données | `prospects.source` obligatoire à chaque import. |
+| Origine des données | `prospects.source` obligatoire à chaque import. Pour la collecte : `recherche-entreprises (dirigeants RNE)`, et `email_source = hunter` pour l'email. **À faire :** mentionner cette origine dans le premier message (pied de page de l'outil d'envoi). |
 | Droit d'opposition | Lien de désinscription ajouté par l'outil d'envoi → W6 → `opt_outs`. Les réponses du type « retirez-moi » sont classées `opt_out` automatiquement. |
 | Respect durable de l'opposition | Hash HMAC conservé même après suppression du prospect. Vérifié à l'import, à la validation et avant l'envoi. |
-| Minimisation | Seules les informations professionnelles sont collectées. La consigne de recherche exclut la vie privée. |
+| Minimisation | Seules les informations professionnelles sont collectées : pour les dirigeants, prénom, nom et fonction (ni date de naissance ni nationalité). Les emails rejetés ne sont pas conservés. La consigne de recherche exclut la vie privée. |
 | Durée de conservation | Exécutions n8n purgées après 14 jours. **À faire :** purge planifiée des prospects sans interaction depuis 3 ans (recommandation CNIL). |
 | Droit d'accès et d'effacement | **À faire :** endpoint d'export et de suppression par email. En attendant : requêtes SQL manuelles (`ON DELETE CASCADE` sur `research` et `messages`). |
-| Sous-traitants | OpenAI (recherche, rédaction, classification), outil d'envoi, Telegram, hébergeur du VPS, stockage des sauvegardes. À inscrire au registre des traitements, avec leurs DPA et les transferts hors UE. |
+| Sous-traitants | OpenAI (recherche, rédaction, classification), Hunter (recherche d'emails), outil d'envoi, Telegram, hébergeur du VPS, stockage des sauvegardes. À inscrire au registre des traitements, avec leurs DPA et les transferts hors UE. |
 | Sécurité | Voir [§ 10](#10-sécurité). |
 
 **Flux de données personnelles hors du VPS :**
 
 - **API OpenAI** : nom, poste, entreprise, note de recherche, contenu des réponses. Les appels sont faits avec `store=False`. Vérifiez la politique de conservation des données de l'API OpenAI (par défaut, pas d'utilisation pour l'entraînement ; conservation limitée pour la détection des abus), signez son DPA et, si besoin, demandez la résidence des données en Europe ou la conservation zéro.
+- **Hunter** : prénom, nom et entreprise des dirigeants collectés (société française, infrastructure dans l'UE selon ses indications : à vérifier dans son DPA).
 - **Outil d'envoi** : email, prénom, texte du message.
 - **Telegram** : brouillons et résumés de réponses. Utilisez un groupe privé limité aux relecteurs. Les messages ne sont pas chiffrés de bout en bout (hors « chats secrets », inaccessibles aux bots).
 - **Sauvegardes hors site** : chiffrées par restic avant l'envoi.
@@ -641,13 +712,14 @@ uv run alembic upgrade head
 
 - `POST /prospects/{id}/process` est synchrone et peut durer plusieurs minutes. C'est acceptable avec un prospect à la fois. Pour paralléliser, passer à un traitement en tâche de fond (file de tâches, puis `GET` de suivi).
 - L'import CSV charge tout le fichier en mémoire (quelques dizaines de milliers de lignes au plus).
-- L'enrichissement se limite à l'entreprise. Aucune recherche d'email n'est faite (Dropcontact peut s'ajouter dans `enrichment.py`).
-- W4 à W7 restent à construire (§ 8.4). En local, la validation Telegram (W3) nécessite un tunnel.
+- La collecte ne cible que les dirigeants déclarés au registre, et la recherche d'email dépend de Hunter (un seul fournisseur, pas de repli). Un second fournisseur (Dropcontact…) pourrait s'ajouter dans `hunter.py` / `collection.py`.
+- Les prospects `no_email` ne sont pas retentés automatiquement.
+- W4 à W7 restent à construire (§ 8.5). En local, la validation Telegram (W3) nécessite un tunnel.
 
 **Prochaines étapes suggérées :**
 
 1. Remplir `playbook/` et tester le traitement sur 10 prospects réels.
-2. Créer le bot Telegram, importer W0 à W3 et tester un import de bout en bout ; construire W4 à W6 une fois l'outil d'envoi choisi.
+2. Adapter `playbook/sourcing.json` à l'ICP, créer le bot Telegram, importer les workflows et lancer W8 à la main pour vérifier la collecte ; construire W4 à W6 une fois l'outil d'envoi choisi.
 3. Endpoints RGPD : export et suppression par email, purge automatique après 3 ans.
 4. Jeu d'évaluation des emails générés (20 à 50 cas), avant tout changement de modèle ou de prompt.
 5. Intégration continue : `pytest` et `ruff` à chaque push.

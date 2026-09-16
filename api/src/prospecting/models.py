@@ -22,6 +22,8 @@ def str_enum(cls: type[enum.StrEnum]) -> Enum:
 
 
 class ProspectStatus(enum.StrEnum):
+    TO_ENRICH = "to_enrich"  # dirigeant trouvé, email encore inconnu
+    NO_EMAIL = "no_email"  # aucun email fiable trouvé
     NEW = "new"
     PROCESSING = "processing"  # recherche/rédaction en cours (verrou applicatif)
     RESEARCHED = "researched"
@@ -75,6 +77,8 @@ class Prospect(Base):
     linkedin_url: Mapped[str | None] = mapped_column(String(512))
     # Origine de la donnée : obligatoire pour répondre à une demande RGPD.
     source: Mapped[str] = mapped_column(String(255))
+    # Outil ayant fourni l'email quand il ne vient pas de la source (ex. « hunter »).
+    email_source: Mapped[str | None] = mapped_column(String(32))
     status: Mapped[ProspectStatus] = mapped_column(
         str_enum(ProspectStatus), default=ProspectStatus.NEW, index=True
     )
@@ -154,3 +158,48 @@ class LlmCall(Base):
     duration_ms: Mapped[int]
     stop_reason: Mapped[str | None] = mapped_column(String(32))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class EmailLookupOutcome(enum.StrEnum):
+    FOUND = "found"  # email trouvé et accepté
+    REJECTED = "rejected"  # email trouvé mais trop peu fiable (crédit consommé)
+    NOT_FOUND = "not_found"
+    DUPLICATE = "duplicate"  # email déjà connu sur un autre prospect
+    OPTED_OUT = "opted_out"
+
+
+class EmailLookup(Base):
+    """Journal des recherches d'email : plafond quotidien et suivi des crédits.
+
+    L'email lui-même n'est pas stocké ici (minimisation).
+    """
+
+    __tablename__ = "email_lookups"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    prospect_id: Mapped[int | None] = mapped_column(
+        ForeignKey("prospects.id", ondelete="SET NULL"), index=True
+    )
+    provider: Mapped[str] = mapped_column(String(32))
+    outcome: Mapped[EmailLookupOutcome] = mapped_column(str_enum(EmailLookupOutcome))
+    score: Mapped[int | None]
+    verification: Mapped[str | None] = mapped_column(String(32))
+    credit_used: Mapped[bool]
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True
+    )
+
+
+class SourcingCursor(Base):
+    """Page suivante à lire pour un jeu de critères de recherche d'entreprises."""
+
+    __tablename__ = "sourcing_cursors"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    criteria_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    criteria: Mapped[dict] = mapped_column(JSON)
+    next_page: Mapped[int] = mapped_column(default=1)
+    exhausted: Mapped[bool] = mapped_column(default=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )

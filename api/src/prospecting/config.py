@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     # Salt pour hacher les emails de la liste d'opposition.
     optout_salt: SecretStr
 
+    # Recherche d'emails des dirigeants (facultatif : sans clé, la collecte s'arrête aux noms).
+    hunter_api_key: SecretStr | None = None
+
 
 @lru_cache
 def get_settings() -> Settings:

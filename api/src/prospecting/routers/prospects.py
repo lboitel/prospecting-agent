@@ -6,11 +6,19 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from pydantic import ValidationError
 from sqlalchemy import select
 
+from prospecting.collection import find_prospect_email
 from prospecting.db import SessionDep
 from prospecting.enrichment import find_company
 from prospecting.llm.client import LLM_ERRORS
 from prospecting.models import Prospect, ProspectStatus
-from prospecting.schemas import ImportReport, MessageOut, ProcessResult, ProspectIn, ProspectOut
+from prospecting.schemas import (
+    FindEmailResult,
+    ImportReport,
+    MessageOut,
+    ProcessResult,
+    ProspectIn,
+    ProspectOut,
+)
 from prospecting.services import OptedOut, process_prospect, upsert_prospect
 
 router = APIRouter(prefix="/prospects", tags=["prospects"])
@@ -85,6 +93,12 @@ def enrich(prospect: ProspectDep, session: SessionDep):
                 setattr(company, field, value)
         session.commit()
     return prospect
+
+
+@router.post("/{prospect_id}/find-email", response_model=FindEmailResult)
+def find_email(prospect: ProspectDep, session: SessionDep):
+    """Cherche l'email d'un dirigeant avec Hunter (plafond quotidien dans sourcing.json)."""
+    return find_prospect_email(session, prospect)
 
 
 @router.post("/{prospect_id}/process", response_model=ProcessResult)
