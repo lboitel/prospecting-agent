@@ -11,7 +11,9 @@ services:
   n8n:
     environment:
       N8N_EDITOR_BASE_URL: https://localhost:${DEV_HTTPS_PORT:-8443}/
-      WEBHOOK_URL: https://localhost:${DEV_HTTPS_PORT:-8443}/
+      # Telegram refuse les boutons pointant vers localhost : en local, mettre l'URL
+      # d'un tunnel dans DEV_WEBHOOK_URL pour tester la validation (W3).
+      WEBHOOK_URL: ${DEV_WEBHOOK_URL:-https://localhost:8443/}
 
   api:
     ports:

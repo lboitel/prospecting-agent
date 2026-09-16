@@ -14,6 +14,9 @@ cd api && uv sync && uv run pytest
 # Pile complète en local
 cp .env.example .env   # N8N_DOMAIN=localhost, renseigner les secrets
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+
+# Workflows n8n (après création du compte n8n et du bot Telegram)
+./scripts/n8n-import.sh --publish
 ```
 
 Déploiement sur VPS, sauvegardes et exploitation : voir [§ 11 de l'architecture](docs/ARCHITECTURE.md#11-déploiement-et-exploitation).

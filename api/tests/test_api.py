@@ -1,8 +1,14 @@
-from fastapi.testclient import TestClient
+from datetime import UTC, datetime, timedelta
 
+from fastapi.testclient import TestClient
+from sqlalchemy import update
+
+from prospecting import services
+from prospecting.db import SessionLocal
 from prospecting.llm.client import LlmRefusal
 from prospecting.llm.replies import ReplyCategory
 from prospecting.main import app
+from prospecting.models import Prospect, ProspectStatus
 
 PROSPECT = {
     "email": "Marie.Durand@Acme.fr",
@@ -120,6 +126,42 @@ def test_failed_draft_resumes_without_new_research(client, fake_llm):
     processed = client.post(f"/prospects/{prospect['id']}/process")
     assert processed.status_code == 200
     assert fake_llm.research_calls == 1
+
+
+def test_prospect_in_progress_is_locked_until_stale(client, fake_llm):
+    prospect = create_prospect(client)
+    with SessionLocal() as session:
+        session.execute(
+            update(Prospect)
+            .where(Prospect.id == prospect["id"])
+            .values(status=ProspectStatus.PROCESSING, updated_at=datetime.now(UTC))
+        )
+        session.commit()
+    # Exécution n8n concurrente : refus sans appel LLM.
+    assert client.post(f"/prospects/{prospect['id']}/process").status_code == 409
+    assert fake_llm.research_calls == 0
+
+    with SessionLocal() as session:
+        session.execute(
+            update(Prospect)
+            .where(Prospect.id == prospect["id"])
+            .values(updated_at=datetime.now(UTC) - timedelta(hours=1))
+        )
+        session.commit()
+    # Traitement interrompu depuis longtemps : repris.
+    assert client.post(f"/prospects/{prospect['id']}/process").status_code == 200
+
+
+def test_failed_research_releases_lock(client, fake_llm, monkeypatch):
+    prospect = create_prospect(client)
+
+    def refuse(session, prospect):
+        raise LlmRefusal("refus")
+
+    monkeypatch.setattr(services, "research_prospect", refuse)
+    assert client.post(f"/prospects/{prospect['id']}/process").status_code == 502
+    listed = client.get("/prospects", params={"status": "new"}).json()
+    assert [p["id"] for p in listed] == [prospect["id"]]
 
 
 def test_opt_out_reply_blocks_everything(client, fake_llm):

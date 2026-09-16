@@ -2,9 +2,9 @@
 
 import hashlib
 import hmac
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.orm import Session
 
 from prospecting.config import get_settings
@@ -105,32 +105,67 @@ def upsert_prospect(session: Session, data: ProspectIn) -> tuple[Prospect, bool]
     return prospect, created
 
 
+# Au-delà, un traitement est considéré comme interrompu (conteneur redémarré...).
+STALE_PROCESSING = timedelta(minutes=15)
+
+
+def claim_prospect(session: Session, prospect: Prospect) -> None:
+    """Passe le prospect en `processing` de façon atomique.
+
+    Deux exécutions n8n qui se chevauchent ne peuvent pas traiter (ni facturer)
+    le même prospect : la seconde reçoit un 409.
+    """
+    now = datetime.now(UTC)
+    claimable = or_(
+        Prospect.status.in_([ProspectStatus.NEW, ProspectStatus.RESEARCHED]),
+        and_(
+            Prospect.status == ProspectStatus.PROCESSING,
+            Prospect.updated_at < now - STALE_PROCESSING,
+        ),
+    )
+    result = session.execute(
+        update(Prospect)
+        .where(Prospect.id == prospect.id, claimable)
+        .values(status=ProspectStatus.PROCESSING, updated_at=now)
+        .execution_options(synchronize_session=False)
+    )
+    if result.rowcount != 1:
+        session.rollback()
+        session.refresh(prospect)
+        raise Conflict(f"prospect {prospect.id} déjà traité ou en cours ({prospect.status})")
+    session.commit()
+    session.refresh(prospect)
+
+
 def process_prospect(
     session: Session, prospect: Prospect
 ) -> tuple[Research, DraftResult, Message | None]:
     """Recherche puis qualification/rédaction.
 
-    Refuse un prospect déjà traité. Un prospect bloqué en `researched` (échec de la
-    rédaction) reprend à l'étape 2 avec la recherche existante.
+    Refuse un prospect déjà traité ou en cours de traitement. Un prospect bloqué en
+    `researched` (échec de la rédaction) reprend à l'étape 2 avec la recherche existante.
     """
-    if prospect.status not in (ProspectStatus.NEW, ProspectStatus.RESEARCHED):
-        raise Conflict(f"prospect {prospect.id} déjà traité (statut {prospect.status})")
     if is_opted_out(session, prospect.email):
         raise OptedOut(prospect.email)
+    claim_prospect(session, prospect)
 
-    if prospect.status == ProspectStatus.RESEARCHED and prospect.research:
-        research = max(prospect.research, key=lambda r: r.id)
-    else:
-        found = research_prospect(session, prospect)
-        research = Research(
-            prospect=prospect, summary=found.summary, sources=found.sources, model=found.model
-        )
-        session.add(research)
-        prospect.status = ProspectStatus.RESEARCHED
-        # On enregistre la recherche avant l'étape suivante : elle a un coût.
-        session.commit()
+    try:
+        if prospect.research:
+            research = max(prospect.research, key=lambda r: r.id)
+        else:
+            found = research_prospect(session, prospect)
+            research = Research(
+                prospect=prospect, summary=found.summary, sources=found.sources, model=found.model
+            )
+            session.add(research)
+            # On enregistre la recherche avant l'étape suivante : elle a un coût.
+            session.commit()
+        draft = qualify_and_draft(session, prospect, research)
+    except Exception:
+        # Libère le verrou ; l'appelant décide de valider ou non la transaction.
+        prospect.status = ProspectStatus.RESEARCHED if prospect.research else ProspectStatus.NEW
+        raise
 
-    draft = qualify_and_draft(session, prospect, research)
     prospect.score = draft.score
     message = None
     if draft.qualified and draft.body:

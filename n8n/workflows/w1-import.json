@@ -1,0 +1,209 @@
+{
+  "id": "prospectW1Import",
+  "name": "W1 · Import de prospects",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "authentication": "n8nUserAuth",
+        "formTitle": "Importer des prospects",
+        "formDescription": "Fichier CSV en UTF-8, séparateur virgule ou point-virgule. Colonnes reconnues : email (obligatoire), first_name, last_name, job_title, linkedin_url, company_name, company_domain, siren.",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Fichier CSV",
+              "fieldName": "fichier",
+              "fieldType": "file",
+              "multipleFiles": false,
+              "acceptFileTypes": ".csv",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Origine des contacts",
+              "fieldName": "source",
+              "placeholder": "ex. salon-vivatech-2026, export-crm-sept",
+              "requiredField": true
+            }
+          ]
+        },
+        "options": {
+          "path": "import-prospects",
+          "appendAttribution": false,
+          "buttonLabel": "Importer"
+        }
+      },
+      "id": "4f1ac652-c033-5425-b084-2f017fe5de23",
+      "name": "Formulaire import",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.6,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "5819d8b9-4857-5e62-a902-cfff1c70eabc"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://api:8000/prospects/import",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "source",
+              "value": "={{ $json.source }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "parameterType": "formBinaryData",
+              "name": "file",
+              "inputDataFieldName": "fichier"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "28694c73-0084-57e7-96cd-b2bd8e6b3055",
+      "name": "Import API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        240,
+        0
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "prospectApiCreds",
+          "name": "Prospecting API"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "chatId": "__TELEGRAM_CHAT_ID__",
+        "text": "={{ '📥 *Import* « ' + String(($('Formulaire import').item.json.source) ?? '').replace(/([_*`\\[])/g, '\\\\$1') + ' » par ' + String(($('Formulaire import').item.json.user?.email) ?? '').replace(/([_*`\\[])/g, '\\\\$1') + '\\nCréés : ' + $json.created + ' · mis à jour : ' + $json.updated + ' · ignorés (opposition) : ' + $json.skipped_opted_out + ' · erreurs : ' + $json.errors.length + ($json.errors.length ? '\\n' + String(($json.errors.slice(0, 10).join('\\n')) ?? '').replace(/([_*`\\[])/g, '\\\\$1') : '') }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "f9c2659b-bf2d-5a78-8e33-8631aa6667b8",
+      "name": "Rapport Telegram",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        480,
+        -100
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "prospectTelegram",
+          "name": "Telegram Prospection"
+        }
+      },
+      "webhookId": "0ee069ce-4844-53e5-ac29-e384af8d7cf2"
+    },
+    {
+      "parameters": {
+        "operation": "completion",
+        "respondWith": "showText",
+        "responseText": "={{ '<h3>Import terminé</h3><p>' + $('Import API').item.json.created + ' créés, ' + $('Import API').item.json.updated + ' mis à jour, ' + $('Import API').item.json.skipped_opted_out + ' ignorés (liste d\\'opposition).</p>' + ($('Import API').item.json.errors.length ? '<p>Lignes rejetées :</p><ul>' + $('Import API').item.json.errors.map(e => '<li>' + e.replace(/[<>&]/g, '') + '</li>').join('') + '</ul>' : '') }}"
+      },
+      "id": "ee001d69-069c-550f-b6f7-191780f3ce92",
+      "name": "Afficher le rapport",
+      "type": "n8n-nodes-base.form",
+      "typeVersion": 2.5,
+      "position": [
+        720,
+        -100
+      ],
+      "webhookId": "c2814225-5b51-5d1f-93a6-1acf1d439929"
+    },
+    {
+      "parameters": {
+        "operation": "completion",
+        "respondWith": "showText",
+        "responseText": "={{ '<h3>Échec de l\\'import</h3><p>' + String($json.error?.message ?? 'erreur inconnue').replace(/[<>&]/g, '') + '</p>' }}"
+      },
+      "id": "c0b49fc6-9e98-5240-bc21-908cc1b418a2",
+      "name": "Afficher l'échec",
+      "type": "n8n-nodes-base.form",
+      "typeVersion": 2.5,
+      "position": [
+        480,
+        100
+      ],
+      "webhookId": "b48101b0-14d8-5f90-bee0-46369d423361"
+    }
+  ],
+  "connections": {
+    "Formulaire import": {
+      "main": [
+        [
+          {
+            "node": "Import API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Import API": {
+      "main": [
+        [
+          {
+            "node": "Rapport Telegram",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Afficher l'échec",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Rapport Telegram": {
+      "main": [
+        [
+          {
+            "node": "Afficher le rapport",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Paris",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "binaryMode": "separate",
+    "errorWorkflow": "prospectW0Errors"
+  },
+  "pinData": {},
+  "tags": [
+    {
+      "id": "prospectTagAgent",
+      "name": "prospection"
+    }
+  ],
+  "meta": {
+    "templateCredsSetupCompleted": true
+  }
+}

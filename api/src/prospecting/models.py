@@ -23,6 +23,7 @@ def str_enum(cls: type[enum.StrEnum]) -> Enum:
 
 class ProspectStatus(enum.StrEnum):
     NEW = "new"
+    PROCESSING = "processing"  # recherche/rédaction en cours (verrou applicatif)
     RESEARCHED = "researched"
     DISQUALIFIED = "disqualified"
     DRAFT_READY = "draft_ready"

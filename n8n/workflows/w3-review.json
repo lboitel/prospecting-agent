@@ -1,0 +1,388 @@
+{
+  "id": "prospectW3Review",
+  "name": "W3 · Validation des brouillons",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "inputSource": "passthrough"
+      },
+      "id": "48b3e603-ae79-5b57-92ae-ec22a8e88b70",
+      "name": "Brouillon reçu",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "notes": "Appelé par W2 avec le résultat de POST /prospects/{id}/process."
+    },
+    {
+      "parameters": {
+        "operation": "sendAndWait",
+        "chatId": "__TELEGRAM_CHAT_ID__",
+        "message": "={{ '📝 *Brouillon à valider* : ' + String(([$json.prospect.first_name, $json.prospect.last_name].filter(Boolean).join(' ') || $json.prospect.email) ?? '').replace(/([_*`\\[])/g, '\\\\$1') + ' (' + String(($json.prospect.email) ?? '').replace(/([_*`\\[])/g, '\\\\$1') + ')\\nScore : ' + $json.score + '/100 · ' + String(($json.reasons.join(' ; ')) ?? '').replace(/([_*`\\[])/g, '\\\\$1') + '\\n\\n*Objet* : ' + String(($json.draft.subject) ?? '').replace(/([_*`\\[])/g, '\\\\$1') + '\\n\\n' + String(($json.draft.body) ?? '').replace(/([_*`\\[])/g, '\\\\$1') + '\\n\\n*Sources* :\\n' + String(($json.sources.join('\\n')) ?? '').replace(/([_*`\\[])/g, '\\\\$1') }}",
+        "responseType": "customForm",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Décision",
+              "fieldType": "dropdown",
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "Valider"
+                  },
+                  {
+                    "option": "Rejeter"
+                  }
+                ]
+              },
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Objet",
+              "defaultValue": "={{ $json.draft.subject }}",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Message",
+              "fieldType": "textarea",
+              "defaultValue": "={{ $json.draft.body }}",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Votre prénom",
+              "requiredField": true
+            }
+          ]
+        },
+        "options": {
+          "messageButtonLabel": "Relire et décider",
+          "responseFormTitle": "={{ 'Brouillon pour ' + [$('Brouillon reçu').item.json.prospect.first_name, $('Brouillon reçu').item.json.prospect.last_name].filter(Boolean).join(' ') || $('Brouillon reçu').item.json.prospect.email }}",
+          "responseFormDescription": "Corrigez l'objet et le message si besoin, puis validez ou rejetez.",
+          "responseFormButtonLabel": "Enregistrer la décision",
+          "limitWaitTime": {
+            "values": {
+              "limitType": "afterTimeInterval",
+              "resumeAmount": 7,
+              "resumeUnit": "days"
+            }
+          },
+          "appendAttribution": false
+        }
+      },
+      "id": "877dc5f0-2bba-5b96-8665-8a43853bdc97",
+      "name": "Demander la décision",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        240,
+        0
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "prospectTelegram",
+          "name": "Telegram Prospection"
+        }
+      },
+      "webhookId": "f8378438-b54c-5feb-acd4-96297e8e4651",
+      "notes": "Sans réponse sous 7 jours, l'exécution se termine et le brouillon reste en attente."
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "3c3b3ba0-7c49-57ef-a583-9672dffcddce",
+                    "leftValue": "={{ $json.data?.['Décision'] }}",
+                    "rightValue": "Valider",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Valider"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "d073431d-88f8-5dc6-ab21-62ca7b116488",
+                    "leftValue": "={{ $json.data?.['Décision'] }}",
+                    "rightValue": "Rejeter",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Rejeter"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "77641468-bbe5-5dba-8cca-dbed03288aac",
+      "name": "Selon la décision",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        480,
+        0
+      ],
+      "notes": "Aucune sortie si le délai de réponse a expiré."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://api:8000/messages/{{ $('Brouillon reçu').item.json.draft.id }}/approve",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ reviewer: $json.data['Votre prénom'], subject: $json.data['Objet'], body: $json.data['Message'] }) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "8ac5b1c2-b432-51d0-8320-fb8d9980eb70",
+      "name": "Valider le message",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        720,
+        -100
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "prospectApiCreds",
+          "name": "Prospecting API"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://api:8000/messages/{{ $('Brouillon reçu').item.json.draft.id }}/reject",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ reviewer: $json.data['Votre prénom'] }) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "bf33cbc8-5a75-5cc6-b0b3-015514d83b4f",
+      "name": "Rejeter le message",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        720,
+        100
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "prospectApiCreds",
+          "name": "Prospecting API"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "chatId": "__TELEGRAM_CHAT_ID__",
+        "text": "={{ '✅ Message pour ' + String(([$('Brouillon reçu').item.json.prospect.first_name, $('Brouillon reçu').item.json.prospect.last_name].filter(Boolean).join(' ') || $('Brouillon reçu').item.json.prospect.email) ?? '').replace(/([_*`\\[])/g, '\\\\$1') + ' validé par ' + String(($('Demander la décision').item.json.data['Votre prénom']) ?? '').replace(/([_*`\\[])/g, '\\\\$1') + '.\\nL\\'envoi sera fait par W4 (à brancher).' }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "336c5f68-84c8-549f-8d78-5fdf88fbff6f",
+      "name": "Confirmer la validation",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        960,
+        -200
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "prospectTelegram",
+          "name": "Telegram Prospection"
+        }
+      },
+      "webhookId": "232e6ff3-ddd9-5d4e-8891-299d6b645a0c"
+    },
+    {
+      "parameters": {
+        "chatId": "__TELEGRAM_CHAT_ID__",
+        "text": "={{ '🗑️ Message pour ' + String(([$('Brouillon reçu').item.json.prospect.first_name, $('Brouillon reçu').item.json.prospect.last_name].filter(Boolean).join(' ') || $('Brouillon reçu').item.json.prospect.email) ?? '').replace(/([_*`\\[])/g, '\\\\$1') + ' rejeté par ' + String(($('Demander la décision').item.json.data['Votre prénom']) ?? '').replace(/([_*`\\[])/g, '\\\\$1') + '.' }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "10d52a43-f139-5c33-a779-c8fdc9911b2a",
+      "name": "Confirmer le rejet",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        960,
+        100
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "prospectTelegram",
+          "name": "Telegram Prospection"
+        }
+      },
+      "webhookId": "fa347189-5d5c-5f21-8b18-6d7e290ed59a"
+    },
+    {
+      "parameters": {
+        "chatId": "__TELEGRAM_CHAT_ID__",
+        "text": "={{ '⚠️ Décision non enregistrée pour ' + String(([$('Brouillon reçu').item.json.prospect.first_name, $('Brouillon reçu').item.json.prospect.last_name].filter(Boolean).join(' ') || $('Brouillon reçu').item.json.prospect.email) ?? '').replace(/([_*`\\[])/g, '\\\\$1') + ' : ' + String(($json.error?.message) ?? '').replace(/([_*`\\[])/g, '\\\\$1') + '\\n(contact désinscrit entre-temps, ou brouillon déjà traité)' }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "ccff6f59-1d70-5982-8792-1ea78bd91d39",
+      "name": "Signaler le refus de l'API",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        960,
+        -50
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "prospectTelegram",
+          "name": "Telegram Prospection"
+        }
+      },
+      "webhookId": "24a98eba-00b7-52c5-b436-92e67601a349"
+    }
+  ],
+  "connections": {
+    "Brouillon reçu": {
+      "main": [
+        [
+          {
+            "node": "Demander la décision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Demander la décision": {
+      "main": [
+        [
+          {
+            "node": "Selon la décision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Selon la décision": {
+      "main": [
+        [
+          {
+            "node": "Valider le message",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Rejeter le message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Valider le message": {
+      "main": [
+        [
+          {
+            "node": "Confirmer la validation",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Signaler le refus de l'API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Rejeter le message": {
+      "main": [
+        [
+          {
+            "node": "Confirmer le rejet",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Signaler le refus de l'API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Paris",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "binaryMode": "separate",
+    "errorWorkflow": "prospectW0Errors"
+  },
+  "pinData": {},
+  "tags": [
+    {
+      "id": "prospectTagAgent",
+      "name": "prospection"
+    }
+  ],
+  "meta": {
+    "templateCredsSetupCompleted": true
+  }
+}

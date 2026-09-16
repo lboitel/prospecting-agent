@@ -60,7 +60,7 @@ flowchart LR
     end
 
     User(("Équipe")) -->|UI n8n| Caddy
-    Tools["lemlist / LGM<br/>Slack"] <-->|webhooks · API| Caddy
+    Tools["lemlist / LGM<br/>Telegram"] <-->|webhooks · API| Caddy
     Caddy --> n8n
     n8n -->|HTTP interne<br/>X-API-Key| API
     n8n --> PG
@@ -72,7 +72,7 @@ flowchart LR
 
 **Répartition des rôles :**
 
-- **n8n** décide *quand* agir et *avec quel outil externe* : déclencheurs (planification, webhooks), connexions aux outils (Slack, lemlist, CRM), notifications, boucles de validation humaine.
+- **n8n** décide *quand* agir et *avec quel outil externe* : déclencheurs (planification, webhooks), connexions aux outils (Telegram, lemlist, CRM), notifications, boucles de validation humaine.
 - **L'API Python** décide *quoi faire* : règles métier, appels au LLM, dédoublonnage, liste d'opposition, transitions de statut. Elle est la seule à écrire dans la base `prospecting`.
 - **Postgres** est la source de vérité unique.
 
@@ -103,11 +103,12 @@ prospecting-agent/
 │   ├── tests/                  Tests pytest (LLM simulé)
 │   ├── Dockerfile
 │   └── pyproject.toml / uv.lock
+├── n8n/workflows/              Workflows W0 à W3 (JSON importable)
 ├── playbook/                   Offre, ICP, ton : éditables sans redéployer
 ├── infra/
 │   ├── caddy/Caddyfile
 │   └── postgres/init/          Création des bases et des utilisateurs
-├── scripts/                    Sauvegarde et restauration
+├── scripts/                    Sauvegarde, restauration, import des workflows n8n
 ├── docker-compose.yml          Production (VPS)
 ├── docker-compose.dev.yml      Surcouche pour le poste de développement
 └── .env.example                Variables à renseigner
@@ -118,7 +119,7 @@ prospecting-agent/
 ## 3. Principes directeurs
 
 1. **Humain dans la boucle.** Aucun email ne part sans validation explicite. L'API l'impose : un message ne peut être marqué comme envoyé que s'il a le statut `approved` (sinon HTTP 409).
-2. **Données sur le VPS.** Les seuls flux sortants de données prospects vont vers l'API Anthropic (recherche et rédaction), l'outil d'envoi et Slack. Voir [§ 9](#9-données-et-rgpd).
+2. **Données sur le VPS.** Les seuls flux sortants de données prospects vont vers l'API Anthropic (recherche et rédaction), l'outil d'envoi et Telegram. Voir [§ 9](#9-données-et-rgpd).
 3. **Traçabilité.** Chaque personnalisation cite ses sources (URL), chaque prospect a une origine (`source`), chaque appel LLM est journalisé avec son coût en tokens.
 4. **Idempotence.** n8n peut rejouer une exécution et les outils externes renvoient parfois un même webhook plusieurs fois. Toutes les opérations supportent la répétition sans effet de bord (voir [§ 5.2](#52-idempotence)).
 5. **Coût maîtrisé.** Une recherche déjà payée n'est jamais refaite. Le playbook est mis en cache côté API. Le modèle le moins cher est utilisé là où il suffit.
@@ -241,7 +242,7 @@ Choix de modélisation :
 
 | Réseau | Membres | Accès Internet |
 |---|---|---|
-| `edge` | Caddy, n8n | Oui (webhooks entrants, appels Slack/lemlist) |
+| `edge` | Caddy, n8n | Oui (webhooks entrants, appels Telegram/lemlist) |
 | `internal` | n8n, API, Postgres | **Non** |
 | `egress` | API | Oui (API Anthropic, API Recherche d'entreprises) |
 
@@ -254,9 +255,12 @@ Choix de modélisation :
 ```mermaid
 stateDiagram-v2
     [*] --> new : import / POST /prospects
-    new --> researched : recherche web OK
-    researched --> draft_ready : qualifié (score ≥ 60)
-    researched --> disqualified : non qualifié
+    new --> processing : POST /process (verrou)
+    researched --> processing : reprise après échec
+    processing --> researched : échec de la rédaction
+    processing --> new : échec de la recherche
+    processing --> draft_ready : qualifié (score ≥ 60)
+    processing --> disqualified : non qualifié
     draft_ready --> approved : validation humaine
     draft_ready --> disqualified : rejet humain
     approved --> sent : outil d'envoi confirme
@@ -273,17 +277,19 @@ stateDiagram-v2
 
 Le passage à `opted_out` est possible depuis n'importe quel statut. Il annule les brouillons et les messages validés non envoyés.
 
-Le traitement (`POST /prospects/{id}/process`) enchaîne deux étapes :
+Le traitement (`POST /prospects/{id}/process`) commence par passer le prospect en `processing` avec une mise à jour conditionnelle (`UPDATE … WHERE status IN ('new', 'researched')`) : deux appels simultanés ne peuvent pas traiter le même prospect. Il enchaîne ensuite deux étapes :
 
-1. **Recherche**. Le résultat est enregistré immédiatement et le prospect passe en `researched`.
-2. **Qualification et rédaction**. Si cette étape échoue (refus du modèle, panne), le prospect reste en `researched`. Un nouvel appel reprend à l'étape 2 avec la recherche existante, sans la repayer.
+1. **Recherche**. Le résultat est enregistré immédiatement.
+2. **Qualification et rédaction**. Si cette étape échoue (refus du modèle, panne), le prospect repasse en `researched`. Un nouvel appel reprend à l'étape 2 avec la recherche existante, sans la repayer.
+
+Si la recherche échoue, le prospect repasse en `new`. S'il reste en `processing` plus de 15 minutes (processus interrompu), il redevient traitable.
 
 ### 5.2 Idempotence
 
 | Situation | Comportement |
 |---|---|
 | Même prospect importé deux fois | Mise à jour (clé : email normalisé). Une valeur vide n'efface pas une valeur connue. |
-| `process` appelé deux fois | HTTP 409 à partir de `draft_ready` ou `disqualified` : pas de double facturation. |
+| `process` appelé deux fois, ou en parallèle | HTTP 409 si le prospect est en cours (`processing`) ou déjà traité : pas de double facturation. |
 | Webhook « envoyé » rejoué | Même `external_id` : réponse 200, rien ne change. |
 | Webhook « réponse » rejoué | Même `external_id` : pas de nouvel appel LLM, `notify_human=false`. |
 | Contact dans la liste d'opposition | Import ignoré, `POST /prospects` et validation refusés (409). |
@@ -371,7 +377,7 @@ Toutes les routes, sauf `/health`, exigent l'en-tête `X-API-Key`. La documentat
 | POST | `/prospects/import?source=…` | Import CSV (`,` ou `;`, UTF-8), renvoie un rapport ligne par ligne | 422 si fichier vide |
 | GET | `/prospects?status=…&limit=…` | Lister (500 max) | — |
 | POST | `/prospects/{id}/enrich` | Compléter l'entreprise via l'API Recherche d'entreprises | 422 sans entreprise |
-| POST | `/prospects/{id}/process` | Recherche, qualification et brouillon (**appel long, jusqu'à quelques minutes**) | 409 si déjà traité, 502 refus/troncature, 503 LLM indisponible |
+| POST | `/prospects/{id}/process` | Recherche, qualification et brouillon (**appel long, jusqu'à quelques minutes**) | 409 si déjà traité ou en cours, 502 refus/troncature, 503 LLM indisponible |
 | GET | `/messages?status=draft` | Lister les messages par statut | — |
 | POST | `/messages/{id}/approve` | Valider, avec corrections éventuelles (`reviewer`, `subject`, `body`) | 409 si pas brouillon ou opposition |
 | POST | `/messages/{id}/reject` | Rejeter (le prospect passe en `disqualified`) | 409 |
@@ -397,26 +403,74 @@ Toutes les routes, sauf `/health`, exigent l'en-tête `X-API-Key`. La documentat
 
 ## 8. Workflows n8n
 
-Les workflows se construisent dans l'interface n8n, puis s'exportent en JSON dans un dossier `n8n/workflows/` du dépôt pour être versionnés. Ils ne sont pas encore fournis.
+Les workflows W0 à W3 sont versionnés dans [`n8n/workflows/`](../n8n/workflows/) et ciblent **n8n 2.39**. Ils ne contiennent aucun secret : l'identifiant du chat Telegram et les identifiants sont injectés à l'import. W4 à W7 restent à construire (§ 8.4).
 
-**Prérequis dans n8n :** créer un identifiant *Header Auth* nommé `Prospecting API` (nom : `X-API-Key`, valeur : `API_KEY` du `.env`). Tous les nœuds *HTTP Request* vers `http://api:8000` l'utilisent.
+### 8.1 Canal : Telegram
+
+Les notifications et la validation passent par un **bot Telegram**.
+
+1. Dans Telegram, écrire à **@BotFather** → `/newbot` → choisir un nom. Le jeton affiché va dans `TELEGRAM_BOT_TOKEN`.
+2. Créer un **groupe privé** (par exemple « Prospection »), y ajouter le bot et les relecteurs.
+3. Envoyer un message dans le groupe, puis ouvrir `https://api.telegram.org/bot<JETON>/getUpdates` : la valeur `chat.id` (négative pour un groupe) va dans `TELEGRAM_CHAT_ID`.
+
+**Validation par formulaire.** W3 utilise l'opération *Send and Wait for Response* avec un formulaire : le message contient un bouton qui ouvre une page n8n où le relecteur corrige l'objet et le corps, choisit *Valider* ou *Rejeter* et indique son prénom. Le bouton pointe vers `WEBHOOK_URL` : il doit être joignable depuis le téléphone ou l'ordinateur du relecteur.
+
+> **En local**, Telegram refuse les boutons dont l'URL pointe vers `localhost`. Pour tester W3, ouvrir un tunnel (par exemple `ngrok http https://localhost:8443 --host-header=localhost`) et mettre son URL dans `DEV_WEBHOOK_URL`, puis redémarrer n8n. W0, W1 et W2 fonctionnent sans tunnel.
+
+Les textes dynamiques sont échappés pour le Markdown de Telegram (`_`, `*`, `` ` ``, `[`) : un brouillon contenant ces caractères ne fait pas échouer l'envoi.
+
+### 8.2 Workflows fournis
+
+| # | Fichier | Déclencheur | Étapes |
+|---|---|---|---|
+| W0 | `w0-errors.json` | *Error Trigger* | Message Telegram : workflow, nœud, erreur, lien vers l'exécution. Défini comme *Error workflow* de W1 à W3. |
+| W1 | `w1-import.json` | *Form Trigger* sur `/form/import-prospects`, **réservé aux utilisateurs connectés à n8n** | Fichier CSV + origine des contacts → `POST /prospects/import` → rapport sur Telegram (avec l'email de la personne) → page de fin avec le détail des lignes rejetées. En cas d'échec de l'API, page d'erreur. |
+| W2 | `w2-processing.json` | Toutes les heures de 9 h à 18 h, du lundi au vendredi (Europe/Paris), ou bouton *Lancer maintenant* | `GET /prospects?status=new&limit=10` → boucle, un prospect à la fois → `POST /enrich` (échec toléré) → `POST /process` (timeout 300 s) → selon le code HTTP : **200** → si un brouillon existe, lancer W3 sans attendre ; **409** (déjà traité ou en cours) → prospect suivant ; **autre / réseau** → alerte Telegram puis prospect suivant. |
+| W3 | `w3-review.json` | Appelé par W2 (reçoit le résultat de `/process`) | Message Telegram : prospect, score, raisons, objet, corps, sources, bouton *Relire et décider* → formulaire prérempli → `POST /messages/{id}/approve` (avec les corrections) ou `/reject` → confirmation sur Telegram. Refus de l'API (409 : contact désinscrit entre-temps) → alerte. Sans réponse sous **7 jours**, l'exécution se termine et le brouillon reste `draft`. |
+
+**Chevauchements.** Si un lot de W2 dure plus d'une heure, le lot suivant peut récupérer les mêmes prospects. L'API les protège : `process` passe le prospect en `processing` de façon atomique, et le second appel reçoit un 409 sans rien facturer. Un prospect resté en `processing` plus de 15 minutes (conteneur redémarré en plein traitement) est de nouveau traitable.
+
+**Limites connues de W2 :** seuls les prospects `new` sont repris. Un prospect resté en `researched` (échec de la rédaction) doit être relancé à la main (`POST /prospects/{id}/process`, qui réutilise la recherche).
+
+### 8.3 Import et mise à jour
+
+```bash
+# 1. Pile démarrée et compte propriétaire n8n créé (première connexion à l'interface)
+# 2. TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID et API_KEY renseignés dans .env
+./scripts/n8n-import.sh             # importe identifiants et workflows (non publiés)
+./scripts/n8n-import.sh --publish   # importe, publie les 4 workflows et redémarre n8n
+```
+
+Le script :
+
+- crée ou met à jour les identifiants **Prospecting API** (*Header Auth*, `X-API-Key`) et **Telegram Prospection**, chiffrés par n8n ;
+- remplace `__TELEGRAM_CHAT_ID__` dans une copie temporaire des workflows, importe cette copie puis la supprime ;
+- conserve les IDs fixes des workflows (`prospectW0Errors`, `prospectW1Import`, `prospectW2Traite`, `prospectW3Review`) : W2 appelle W3 et tous signalent leurs erreurs à W0 par ces IDs ;
+- avec `--publish`, publie aussi W0 et W3 : n8n n'exécute que la **version publiée** d'un sous-workflow ou d'un workflow d'erreur. La publication par la CLI demande un redémarrage de n8n, fait par le script.
+
+**Réimporter écrase** les workflows du même ID. Après une modification dans l'éditeur, exporter avant tout réimport :
+
+```bash
+docker compose exec n8n n8n export:workflow --id=prospectW2Traite --pretty --output=/tmp/w2.json
+docker compose cp n8n:/tmp/w2.json n8n/workflows/w2-processing.json
+# Remettre __TELEGRAM_CHAT_ID__ à la place de l'identifiant réel avant de commiter.
+```
+
+### 8.4 Workflows à construire
 
 | # | Workflow | Déclencheur | Étapes |
 |---|---|---|---|
-| W1 | **Import** | *n8n Form Trigger* avec envoi de fichier et champ « source » (recommandé), ou lecture du dossier `/data/imports` (monté depuis `./data/imports`) | `POST /prospects/import` (fichier en multipart) → message Slack avec le rapport. Pour la variante dossier : les versions récentes de n8n restreignent l'accès aux fichiers locaux (variable `N8N_RESTRICT_FILE_ACCESS_TO`, nœuds désactivés par défaut) ; vérifier la documentation de la version déployée. |
-| W2 | **Traitement** | *Schedule* (ex. toutes les heures en jours ouvrés) | `GET /prospects?status=new&limit=20` → *Loop Over Items* (1 à la fois) → `POST /prospects/{id}/enrich` → `POST /prospects/{id}/process` (**timeout du nœud : 300 s**, erreurs 409 ignorées) → si un brouillon existe, lancer W3. |
-| W3 | **Validation** | Appelé par W2 | Slack : brouillon, score, raisons, sources, boutons *Valider* / *Modifier* / *Rejeter* (*Send and Wait for Response*) → `POST /messages/{id}/approve` ou `/reject` avec le nom du relecteur. |
-| W4 | **Envoi** | Après validation (W3) | Vérifier `GET /opt-outs/check` → ajouter le contact et le message à la campagne lemlist/LGM → `POST /messages/{id}/sent` avec l'identifiant renvoyé. |
-| W5 | **Réponses** | *Webhook* appelé par lemlist/LGM | `POST /replies` → si `stop_sequence`, arrêter la séquence du contact dans l'outil → si `notify_human`, alerte Slack avec le résumé et un lien vers la conversation. **L'humain propose lui-même les créneaux.** |
+| W4 | **Envoi** | Après validation (fin de W3) | Vérifier `GET /opt-outs/check` → ajouter le contact et le message à la campagne lemlist/LGM → `POST /messages/{id}/sent` avec l'identifiant renvoyé. |
+| W5 | **Réponses** | *Webhook* appelé par lemlist/LGM | `POST /replies` → si `stop_sequence`, arrêter la séquence du contact dans l'outil → si `notify_human`, alerte Telegram avec le résumé et un lien vers la conversation. **L'humain propose lui-même les créneaux.** |
 | W6 | **Désinscriptions** | *Webhook* « unsubscribed » de l'outil d'envoi | `POST /opt-outs`. |
-| W7 | **Relances « plus tard »** | *Schedule* quotidien | Prospects `not_now` dont la date est atteinte → alerte Slack (décision humaine). |
-| W0 | **Gestion des erreurs** | *Error Trigger* | Alerte Slack avec le nom du workflow et le lien vers l'exécution. À définir comme *Error workflow* de tous les autres. |
+| W7 | **Relances « plus tard »** | *Schedule* quotidien | Prospects `not_now` dont la date est atteinte → alerte Telegram (décision humaine). |
 
-Bonnes pratiques :
+### 8.5 Bonnes pratiques
 
 - **Un prospect à la fois** dans W2 : un échec n'arrête pas le lot, et les limites de débit de l'API Anthropic sont respectées.
-- **Réessais n8n** (*Retry On Fail*, 2 essais, 60 s d'attente) seulement sur les erreurs 502/503, jamais sur 409.
+- **Pas de réessai automatique sur `/process`** : un 409 est normal, et un 502 (refus du modèle) se reproduirait. Les erreurs sont signalées sur Telegram.
 - **Sécuriser les webhooks** (W5, W6) : authentification par en-tête dans le nœud *Webhook*, avec le secret configuré côté lemlist/LGM.
+- **Noms de nœuds sans apostrophe** lorsqu'ils sont cités dans une expression (`$('Nom du nœud')`).
 - **Ne pas copier de logique métier** dans les nœuds *Code* : si une règle manque, l'ajouter à l'API.
 
 ---
@@ -435,14 +489,14 @@ Bonnes pratiques :
 | Minimisation | Seules les informations professionnelles sont collectées. La consigne de recherche exclut la vie privée. |
 | Durée de conservation | Exécutions n8n purgées après 14 jours. **À faire :** purge planifiée des prospects sans interaction depuis 3 ans (recommandation CNIL). |
 | Droit d'accès et d'effacement | **À faire :** endpoint d'export et de suppression par email. En attendant : requêtes SQL manuelles (`ON DELETE CASCADE` sur `research` et `messages`). |
-| Sous-traitants | Anthropic (recherche, rédaction, classification), outil d'envoi, Slack, hébergeur du VPS, stockage des sauvegardes. À inscrire au registre des traitements, avec leurs DPA et les transferts hors UE. |
+| Sous-traitants | Anthropic (recherche, rédaction, classification), outil d'envoi, Telegram, hébergeur du VPS, stockage des sauvegardes. À inscrire au registre des traitements, avec leurs DPA et les transferts hors UE. |
 | Sécurité | Voir [§ 10](#10-sécurité). |
 
 **Flux de données personnelles hors du VPS :**
 
 - **API Anthropic** : nom, poste, entreprise, note de recherche, contenu des réponses. Consultez la politique de conservation des données d'Anthropic et signez son DPA.
 - **Outil d'envoi** : email, prénom, texte du message.
-- **Slack** : brouillons et résumés de réponses. Utilisez un canal privé.
+- **Telegram** : brouillons et résumés de réponses. Utilisez un groupe privé limité aux relecteurs. Les messages ne sont pas chiffrés de bout en bout (hors « chats secrets », inaccessibles aux bots).
 - **Sauvegardes hors site** : chiffrées par restic avant l'envoi.
 
 ---
@@ -577,15 +631,14 @@ uv run alembic upgrade head
 **Limites actuelles :**
 
 - `POST /prospects/{id}/process` est synchrone et peut durer plusieurs minutes. C'est acceptable avec un prospect à la fois. Pour paralléliser, passer à un traitement en tâche de fond (file de tâches, puis `GET` de suivi).
-- Pas de verrou si deux appels `process` simultanés visent le même prospect (n8n ne le fait pas dans W2). À ajouter (`SELECT … FOR UPDATE`) si le traitement devient concurrent.
 - L'import CSV charge tout le fichier en mémoire (quelques dizaines de milliers de lignes au plus).
 - L'enrichissement se limite à l'entreprise. Aucune recherche d'email n'est faite (Dropcontact peut s'ajouter dans `enrichment.py`).
-- Les workflows n8n restent à construire et à exporter dans le dépôt.
+- W4 à W7 restent à construire (§ 8.4). En local, la validation Telegram (W3) nécessite un tunnel.
 
 **Prochaines étapes suggérées :**
 
 1. Remplir `playbook/` et tester le traitement sur 10 prospects réels.
-2. Construire W0, W1, W2 et W3, puis W4 à W6 une fois l'outil d'envoi choisi.
+2. Créer le bot Telegram, importer W0 à W3 et tester un import de bout en bout ; construire W4 à W6 une fois l'outil d'envoi choisi.
 3. Endpoints RGPD : export et suppression par email, purge automatique après 3 ans.
 4. Jeu d'évaluation des emails générés (20 à 50 cas), avant tout changement de modèle ou de prompt.
 5. Intégration continue : `pytest` et `ruff` à chaque push.

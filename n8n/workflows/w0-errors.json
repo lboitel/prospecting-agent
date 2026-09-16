@@ -1,0 +1,73 @@
+{
+  "id": "prospectW0Errors",
+  "name": "W0 · Alertes d'erreur",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "9fdc539e-5f1a-5e70-a49d-ac4da7d2517f",
+      "name": "Erreur d'exécution",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "__TELEGRAM_CHAT_ID__",
+        "text": "={{ '⚠️ *Échec du workflow* ' + String(($json.workflow?.name) ?? '').replace(/([_*`\\[])/g, '\\\\$1') + '\\nNœud : ' + String(($json.execution?.lastNodeExecuted ?? $json.trigger?.error?.node?.name) ?? '').replace(/([_*`\\[])/g, '\\\\$1') + '\\nErreur : ' + String(($json.execution?.error?.message ?? $json.trigger?.error?.message) ?? '').replace(/([_*`\\[])/g, '\\\\$1') + '\\n' + String(($json.execution?.url) ?? '').replace(/([_*`\\[])/g, '\\\\$1') }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "bf74ac9e-d39e-576c-90ae-1debceb43857",
+      "name": "Alerte Telegram",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        240,
+        0
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "prospectTelegram",
+          "name": "Telegram Prospection"
+        }
+      },
+      "webhookId": "c7b6b59a-b732-581a-986d-3be8a6f9be73"
+    }
+  ],
+  "connections": {
+    "Erreur d'exécution": {
+      "main": [
+        [
+          {
+            "node": "Alerte Telegram",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Paris",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "binaryMode": "separate"
+  },
+  "pinData": {},
+  "tags": [
+    {
+      "id": "prospectTagAgent",
+      "name": "prospection"
+    }
+  ],
+  "meta": {
+    "templateCredsSetupCompleted": true
+  }
+}
