@@ -544,7 +544,7 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
 ```bash
 cd api
 # 1. modifier src/prospecting/models.py
-DATABASE_URL=postgresql+psycopg://prospecting:<mdp>@localhost:5432/prospecting \
+DATABASE_URL=postgresql+psycopg://prospecting:<mdp>@localhost:5433/prospecting \
   uv run alembic revision --autogenerate -m "description"
 # 2. relire le fichier généré dans migrations/versions/
 uv run alembic upgrade head

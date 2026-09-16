@@ -9,7 +9,8 @@ services:
 
   postgres:
     ports:
-      - "127.0.0.1:5432:5432"
+      # 5433 par défaut : 5432 est souvent pris par un Postgres local.
+      - "127.0.0.1:${DEV_POSTGRES_PORT:-5433}:5432"
     # Un conteneur relié uniquement à un réseau `internal` ne peut pas publier de port.
     networks: [internal, dev]
 
