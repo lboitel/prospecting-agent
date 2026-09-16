@@ -1,0 +1,17 @@
+# Surcouche pour le poste de développement (N8N_DOMAIN=localhost dans .env) :
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+# Ports ouverts uniquement sur 127.0.0.1. Ne pas utiliser sur le VPS.
+
+services:
+  api:
+    ports:
+      - "127.0.0.1:8000:8000"
+
+  postgres:
+    ports:
+      - "127.0.0.1:5432:5432"
+    # Un conteneur relié uniquement à un réseau `internal` ne peut pas publier de port.
+    networks: [internal, dev]
+
+networks:
+  dev:
