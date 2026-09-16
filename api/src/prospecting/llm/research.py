@@ -6,16 +6,9 @@ from dataclasses import dataclass
 from sqlalchemy.orm import Session
 
 from prospecting.config import get_settings
-from prospecting.llm.client import (
-    FALLBACK_BETA,
-    check_stop_reason,
-    get_client,
-    record_usage,
-)
+from prospecting.llm.client import check_response, get_client, record_usage
 from prospecting.models import Prospect
 from prospecting.playbook import load_playbook
-
-MAX_PAUSE_RESUMES = 3
 
 INSTRUCTIONS = """\
 Tu prépares une prise de contact commerciale B2B. Cherche sur le web des informations \
@@ -60,57 +53,53 @@ def describe_prospect(prospect: Prospect) -> str:
 
 def research_prospect(session: Session, prospect: Prospect) -> ResearchResult:
     settings = get_settings()
-    client = get_client()
-    messages = [{"role": "user", "content": describe_prospect(prospect)}]
-
-    content = []
-    for _ in range(MAX_PAUSE_RESUMES + 1):
-        started = time.monotonic()
-        response = client.beta.messages.create(
-            model=settings.model_writer,
-            max_tokens=16000,
-            betas=[FALLBACK_BETA],
-            fallbacks="default",
-            output_config={"effort": "medium"},
-            # Le playbook ne change pas d'un prospect à l'autre : il est mis en cache.
-            system=[
-                {"type": "text", "text": INSTRUCTIONS},
-                {
-                    "type": "text",
-                    "text": load_playbook(),
-                    "cache_control": {"type": "ephemeral"},
-                },
-            ],
-            tools=[
-                {
-                    "type": "web_search_20260209",
-                    "name": "web_search",
-                    "max_uses": settings.research_max_searches,
-                    "user_location": {"type": "approximate", "country": "FR"},
-                }
-            ],
-            messages=messages,
-        )
-        record_usage(session, "research", prospect.id, response, started)
-        check_stop_reason(response)
-        content.extend(response.content)
-        if response.stop_reason != "pause_turn":
-            break
-        # Recherche longue interrompue côté serveur : on renvoie le tour pour la reprendre.
-        messages.append({"role": "assistant", "content": response.content})
+    started = time.monotonic()
+    response = get_client().responses.create(
+        model=settings.model_writer,
+        # Préfixe identique d'un prospect à l'autre : mis en cache automatiquement.
+        instructions=f"{INSTRUCTIONS}\n\n{load_playbook()}",
+        input=describe_prospect(prospect),
+        tools=[
+            {
+                "type": "web_search",
+                "user_location": {"type": "approximate", "country": "FR"},
+            }
+        ],
+        max_tool_calls=settings.research_max_searches,
+        include=["web_search_call.action.sources"],
+        reasoning={"effort": "low"},
+        max_output_tokens=16000,
+        prompt_cache_key="prospecting-research",
+        # Pas de conservation de la réponse côté OpenAI (inutile pour un appel unique).
+        store=False,
+    )
+    record_usage(session, "research", prospect.id, response, started)
+    check_response(response)
 
     return ResearchResult(
-        summary="".join(b.text for b in content if b.type == "text").strip(),
-        sources=extract_sources(content),
+        summary=response.output_text.strip(),
+        sources=extract_sources(response.output),
         model=response.model,
     )
 
 
-def extract_sources(content) -> list[dict]:
+def extract_sources(output) -> list[dict]:
+    """Sources citées dans la note d'abord, puis pages consultées sans être citées."""
     sources: dict[str, dict] = {}
-    for block in content:
-        # En cas d'erreur de recherche, `content` est un objet et non une liste.
-        if block.type == "web_search_tool_result" and isinstance(block.content, list):
-            for result in block.content:
-                sources.setdefault(result.url, {"url": result.url, "title": result.title})
+    for item in output:
+        if item.type != "message":
+            continue
+        for content in item.content:
+            if content.type != "output_text":
+                continue
+            for annotation in content.annotations:
+                if annotation.type == "url_citation":
+                    sources.setdefault(
+                        annotation.url, {"url": annotation.url, "title": annotation.title}
+                    )
+    for item in output:
+        action = getattr(item, "action", None) if item.type == "web_search_call" else None
+        if action is not None and action.type == "search":
+            for source in action.sources or []:
+                sources.setdefault(source.url, {"url": source.url, "title": None})
     return list(sources.values())

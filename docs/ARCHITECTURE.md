@@ -66,7 +66,7 @@ flowchart LR
     n8n --> PG
     API --> PG
     PB --> API
-    API -->|recherche, rédaction,<br/>classification| Claude["API Anthropic"]
+    API -->|recherche, rédaction,<br/>classification| OpenAI["API OpenAI"]
     API -->|SIREN, secteur| Sirene["API Recherche<br/>d'entreprises"]
 ```
 
@@ -94,7 +94,7 @@ prospecting-agent/
 │   │   ├── enrichment.py       API Recherche d'entreprises
 │   │   ├── playbook.py         Lecture des fichiers playbook/
 │   │   ├── llm/
-│   │   │   ├── client.py       Client Anthropic, refus, journal des coûts
+│   │   │   ├── client.py       Client OpenAI, refus, journal des coûts
 │   │   │   ├── research.py     Étape 1 : recherche web
 │   │   │   ├── drafting.py     Étape 2 : qualification et rédaction
 │   │   │   └── replies.py      Classification des réponses
@@ -119,7 +119,7 @@ prospecting-agent/
 ## 3. Principes directeurs
 
 1. **Humain dans la boucle.** Aucun email ne part sans validation explicite. L'API l'impose : un message ne peut être marqué comme envoyé que s'il a le statut `approved` (sinon HTTP 409).
-2. **Données sur le VPS.** Les seuls flux sortants de données prospects vont vers l'API Anthropic (recherche et rédaction), l'outil d'envoi et Telegram. Voir [§ 9](#9-données-et-rgpd).
+2. **Données sur le VPS.** Les seuls flux sortants de données prospects vont vers l'API OpenAI (recherche et rédaction), l'outil d'envoi et Telegram. Voir [§ 9](#9-données-et-rgpd).
 3. **Traçabilité.** Chaque personnalisation cite ses sources (URL), chaque prospect a une origine (`source`), chaque appel LLM est journalisé avec son coût en tokens.
 4. **Idempotence.** n8n peut rejouer une exécution et les outils externes renvoient parfois un même webhook plusieurs fois. Toutes les opérations supportent la répétition sans effet de bord (voir [§ 5.2](#52-idempotence)).
 5. **Coût maîtrisé.** Une recherche déjà payée n'est jamais refaite. Le playbook est mis en cache côté API. Le modèle le moins cher est utilisé là où il suffit.
@@ -150,7 +150,7 @@ prospecting-agent/
 | **Pydantic v2** | `schemas.py`, `config.py` | Mêmes modèles pour valider les entrées HTTP et les sorties du LLM. |
 | **SQLAlchemy 2** (synchrone) + **psycopg 3** | `models.py`, `db.py` | ORM mature et typé. Le mode synchrone est plus simple à tester. Le goulot d'étranglement est le LLM, pas la base. |
 | **Alembic** | `migrations/` | Évolutions du schéma versionnées. Les migrations sont appliquées au démarrage du conteneur, ce qui est sûr tant qu'il n'y a qu'une instance de l'API. |
-| **SDK Anthropic 1.x** | `llm/` | SDK officiel : réessais automatiques, sorties structurées, types. |
+| **SDK OpenAI 2.x** (API Responses) | `llm/` | SDK officiel : réessais automatiques, sorties structurées, types. |
 | **httpx** | `enrichment.py` | Client HTTP pour les API tierces. |
 | Aucun port publié | Réseau Docker interne | Seul n8n appelle l'API. L'en-tête `X-API-Key` est une défense supplémentaire, pas la seule. |
 | Utilisateur non-root | `Dockerfile` | Limite l'impact d'une faille. |
@@ -244,7 +244,7 @@ Choix de modélisation :
 |---|---|---|
 | `edge` | Caddy, n8n | Oui (webhooks entrants, appels Telegram/lemlist) |
 | `internal` | n8n, API, Postgres | **Non** |
-| `egress` | API | Oui (API Anthropic, API Recherche d'entreprises) |
+| `egress` | API | Oui (API OpenAI, API Recherche d'entreprises) |
 
 ---
 
@@ -300,21 +300,25 @@ Si la recherche échoue, le prospect repasse en `new`. S'il reste en `processing
 
 ## 6. Couche LLM
 
-### 6.1 Modèles
+### 6.1 Fournisseur et modèles
 
-| Tâche | Modèle par défaut | Effort | Pourquoi |
+Le fournisseur LLM est **OpenAI**, via l'**API Responses** et le SDK officiel `openai` (2.x).
+
+| Tâche | Modèle par défaut | Raisonnement | Pourquoi |
 |---|---|---|---|
-| Recherche web (`research.py`) | `claude-opus-5` | `medium` | Choisir les bonnes requêtes et trier les résultats demande du jugement. `medium` limite le nombre de tours et donc le coût. |
-| Qualification + rédaction (`drafting.py`) | `claude-opus-5` | `high` | C'est la partie visible par le prospect : la qualité prime. |
-| Classification des réponses (`replies.py`) | `claude-haiku-4-5` | — | Tâche simple, fort volume : le modèle le plus rapide et le moins cher suffit. |
+| Recherche web (`research.py`) | `gpt-5.4-mini` | `low` | Choisir les requêtes et résumer les résultats. Un raisonnement léger limite la latence et le coût. |
+| Qualification + rédaction (`drafting.py`) | `gpt-5.4-mini` | `medium` | C'est la partie lue par le prospect : un peu plus de réflexion. |
+| Classification des réponses (`replies.py`) | `gpt-5.4-nano` | `low` | Tâche simple, fort volume : le modèle le moins cher suffit. |
 
-Les modèles se changent sans toucher au code, via `MODEL_WRITER` et `MODEL_CLASSIFIER`. Par exemple, `MODEL_WRITER=claude-sonnet-5` divise le prix par token par 2,5 environ. Comparez d'abord la qualité sur une vingtaine de prospects réels.
+Les modèles se changent sans toucher au code, via `MODEL_WRITER` et `MODEL_CLASSIFIER` (fichier `.env`). Les alias sans date (`gpt-5.4-mini`) suivent le dernier instantané publié par OpenAI. Pour figer le comportement, utilisez l'identifiant daté (par exemple `gpt-5.4-mini-2026-03-17`).
 
-Tarifs indicatifs (API Anthropic, juin 2026, par million de tokens, entrée / sortie) : Opus 5 5 $ / 25 $, Sonnet 5 2 $ / 10 $, Haiku 4.5 1 $ / 5 $. Les recherches web sont facturées en plus, à l'unité. Consultez la page de tarifs Anthropic avant tout budget.
+`gpt-5.4-nano` accepte aussi la recherche web. Il peut remplacer `gpt-5.4-mini` partout si le coût prime, mais c'est sur la rédaction en français et la pertinence de l'accroche que la baisse de qualité se verra le plus. Comparez d'abord sur 15 à 20 prospects réels.
+
+Tarifs indicatifs (OpenAI, septembre 2026, par million de tokens, entrée / entrée en cache / sortie) : `gpt-5.4-mini` 0,75 $ / 0,075 $ / 4,50 $, `gpt-5.4-nano` 0,20 $ / 0,02 $ / 1,25 $. Les tokens de raisonnement sont facturés comme des tokens de sortie. Les recherches web sont facturées en plus, à l'appel. Consultez la page de tarifs d'OpenAI avant tout budget.
 
 ### 6.2 Pourquoi deux appels et pas un agent autonome
 
-Le déroulé est fixe : rechercher, puis qualifier et rédiger. Un workflow codé est plus prévisible, moins cher et plus facile à tester qu'un agent qui choisit lui-même ses étapes. La seule autonomie laissée au modèle est le choix des requêtes de recherche web (outil serveur `web_search`, 5 recherches maximum, réglable par `RESEARCH_MAX_SEARCHES`).
+Le déroulé est fixe : rechercher, puis qualifier et rédiger. Un workflow codé est plus prévisible, moins cher et plus facile à tester qu'un agent qui choisit lui-même ses étapes. La seule autonomie laissée au modèle est le choix des requêtes de recherche web (outil `web_search`, 5 appels maximum, réglable par `RESEARCH_MAX_SEARCHES`).
 
 Séparer recherche et rédaction permet aussi :
 
@@ -326,21 +330,26 @@ Séparer recherche et rédaction permet aussi :
 
 | Mécanisme | Où | Rôle |
 |---|---|---|
-| **Outil serveur `web_search_20260209`** | `research.py` | Recherche exécutée par Anthropic, sans clé d'API de moteur de recherche. Localisation France. Les URL des résultats sont extraites et stockées dans `research.sources`. |
-| **Reprise sur `pause_turn`** | `research.py` | Une recherche longue peut être interrompue côté serveur. Le tour est renvoyé pour la poursuivre, 3 fois au maximum. |
-| **Sorties structurées** (`messages.parse` + Pydantic) | `drafting.py`, `replies.py` | La réponse respecte le schéma (`DraftResult`, `ReplyClassification`), sans analyse de texte fragile. Les modèles Pydantic interdisent les champs inconnus (`extra="forbid"`). |
-| **Cache de prompt** | `research.py`, `drafting.py` | Le playbook est placé en fin de prompt système avec `cache_control`. Les lectures en cache coûtent environ 10 % du prix normal. Le cache ne s'active qu'au-delà d'une taille minimale de prompt (quelques milliers de tokens pour Opus) : un playbook court ne sera pas mis en cache. Vérifiez `llm_calls.cache_read_tokens`. |
-| **Repli en cas de refus** (`fallbacks="default"`) | `research.py`, `drafting.py` | Si les filtres de sécurité d'Opus 5 refusent une requête, l'API la relance automatiquement sur le modèle de repli recommandé. Fonction bêta (`server-side-fallback-2026-07-01`), d'où l'usage de `client.beta.messages`. |
-| **Contrôle de `stop_reason`** | `client.py` | `refusal` → `LlmRefusal`, `max_tokens` → `LlmTruncated`. Dans les deux cas l'API renvoie HTTP 502, et rien de partiel n'est enregistré. |
-| **Réessais** | `client.py` | Le SDK réessaie 4 fois les erreurs 429, 5xx et réseau. Au-delà, l'API renvoie HTTP 503 et n8n pourra relancer plus tard. |
-| **Journal des coûts** | `llm_calls` | Tokens (y compris cache), durée, modèle réellement utilisé (utile en cas de repli) et `request_id` pour le support Anthropic. Enregistré même quand l'appel échoue après facturation. |
+| **Outil `web_search`** | `research.py` | Recherche exécutée par OpenAI, sans clé de moteur de recherche. Localisation France. `max_tool_calls` plafonne le nombre d'appels d'outils par réponse. |
+| **Sources** | `research.py` | Les citations `url_citation` du texte (URL + titre) sont stockées en premier, puis les pages consultées sans être citées (`include=["web_search_call.action.sources"]`, titre vide). |
+| **Sorties structurées** (`responses.parse` + Pydantic) | `drafting.py`, `replies.py` | Le SDK envoie un schéma JSON **strict** : la réponse respecte `DraftResult` ou `ReplyClassification`. Les modèles Pydantic interdisent les champs inconnus (`extra="forbid"`) et tous les champs sont obligatoires, comme l'exige le mode strict. |
+| **Cache de prompt** | les trois | Automatique chez OpenAI dès que le début du prompt est identique et dépasse environ 1 024 tokens. Les consignes et le playbook sont donc placés en tête (`instructions`), avant les données du prospect (`input`). `prompt_cache_key` regroupe les appels de même nature. Un playbook court ne sera pas mis en cache. Vérifiez `llm_calls.cache_read_tokens`. |
+| **`store=False`** | les trois | OpenAI ne conserve pas la réponse pour une consultation ultérieure : chaque appel est indépendant, rien n'est à reprendre. |
+| **Contrôle des réponses** | `client.py` | Bloc `refusal` ou `status=incomplete` pour cause de `content_filter` → `LlmRefusal`. Réponse coupée (`max_output_tokens`), JSON invalide ou autre statut que `completed` → `LlmTruncated`. Dans tous les cas l'API renvoie HTTP 502, et rien de partiel n'est enregistré. |
+| **Limite de sortie** | les trois | `max_output_tokens` inclut les tokens de raisonnement : 16 000 pour la recherche et la rédaction, 4 000 pour la classification. |
+| **Réessais** | `client.py` | Le SDK réessaie 4 fois les erreurs temporaires (limite de débit, erreurs serveur, réseau). Au-delà, l'API renvoie HTTP 503 et n8n pourra relancer plus tard. |
+| **Journal des coûts** | `llm_calls` | Tokens, durée, modèle réellement utilisé (instantané daté), statut et `request_id` pour le support OpenAI. Enregistré même quand l'appel échoue après facturation, sauf pour un JSON tronqué, que le SDK rejette avant de rendre la réponse. |
+
+**Attention :** chez OpenAI, `input_tokens` **inclut** les tokens lus en cache. Le coût d'entrée se calcule donc ainsi : `(input_tokens − cache_read_tokens) × prix + cache_read_tokens × prix en cache`.
 
 Exemple de suivi des coûts :
 
 ```sql
 SELECT date_trunc('day', created_at) AS jour, task, model,
        count(*) AS appels,
-       sum(input_tokens) AS entree, sum(cache_read_tokens) AS cache, sum(output_tokens) AS sortie
+       sum(input_tokens - cache_read_tokens) AS entree_hors_cache,
+       sum(cache_read_tokens) AS entree_cache,
+       sum(output_tokens) AS sortie
 FROM llm_calls GROUP BY 1, 2, 3 ORDER BY 1 DESC;
 ```
 
@@ -467,7 +476,7 @@ docker compose cp n8n:/tmp/w2.json n8n/workflows/w2-processing.json
 
 ### 8.5 Bonnes pratiques
 
-- **Un prospect à la fois** dans W2 : un échec n'arrête pas le lot, et les limites de débit de l'API Anthropic sont respectées.
+- **Un prospect à la fois** dans W2 : un échec n'arrête pas le lot, et les limites de débit de l'API OpenAI sont respectées.
 - **Pas de réessai automatique sur `/process`** : un 409 est normal, et un 502 (refus du modèle) se reproduirait. Les erreurs sont signalées sur Telegram.
 - **Sécuriser les webhooks** (W5, W6) : authentification par en-tête dans le nœud *Webhook*, avec le secret configuré côté lemlist/LGM.
 - **Noms de nœuds sans apostrophe** lorsqu'ils sont cités dans une expression (`$('Nom du nœud')`).
@@ -489,12 +498,12 @@ docker compose cp n8n:/tmp/w2.json n8n/workflows/w2-processing.json
 | Minimisation | Seules les informations professionnelles sont collectées. La consigne de recherche exclut la vie privée. |
 | Durée de conservation | Exécutions n8n purgées après 14 jours. **À faire :** purge planifiée des prospects sans interaction depuis 3 ans (recommandation CNIL). |
 | Droit d'accès et d'effacement | **À faire :** endpoint d'export et de suppression par email. En attendant : requêtes SQL manuelles (`ON DELETE CASCADE` sur `research` et `messages`). |
-| Sous-traitants | Anthropic (recherche, rédaction, classification), outil d'envoi, Telegram, hébergeur du VPS, stockage des sauvegardes. À inscrire au registre des traitements, avec leurs DPA et les transferts hors UE. |
+| Sous-traitants | OpenAI (recherche, rédaction, classification), outil d'envoi, Telegram, hébergeur du VPS, stockage des sauvegardes. À inscrire au registre des traitements, avec leurs DPA et les transferts hors UE. |
 | Sécurité | Voir [§ 10](#10-sécurité). |
 
 **Flux de données personnelles hors du VPS :**
 
-- **API Anthropic** : nom, poste, entreprise, note de recherche, contenu des réponses. Consultez la politique de conservation des données d'Anthropic et signez son DPA.
+- **API OpenAI** : nom, poste, entreprise, note de recherche, contenu des réponses. Les appels sont faits avec `store=False`. Vérifiez la politique de conservation des données de l'API OpenAI (par défaut, pas d'utilisation pour l'entraînement ; conservation limitée pour la détection des abus), signez son DPA et, si besoin, demandez la résidence des données en Europe ou la conservation zéro.
 - **Outil d'envoi** : email, prénom, texte du message.
 - **Telegram** : brouillons et résumés de réponses. Utilisez un groupe privé limité aux relecteurs. Les messages ne sont pas chiffrés de bout en bout (hors « chats secrets », inaccessibles aux bots).
 - **Sauvegardes hors site** : chiffrées par restic avant l'envoi.
@@ -560,7 +569,7 @@ Toujours faire une sauvegarde avant de mettre à jour n8n ou Postgres. Un change
 - Sonde externe (par exemple UptimeRobot) sur `https://<N8N_DOMAIN>/healthz` (sonde de santé intégrée à n8n).
 - Healthcheck Docker sur l'API (`/health`).
 - Workflow W0 pour les erreurs d'exécution.
-- Coûts LLM : requête SQL du [§ 6.3](#63-mécanismes-utilisés), et plafond de dépenses dans la console Anthropic.
+- Coûts LLM : requête SQL du [§ 6.3](#63-mécanismes-utilisés), et plafond de dépenses du projet dans la console OpenAI.
 - Espace disque : alerte au-delà de 80 % (volume Postgres et `backups/`).
 
 ---
@@ -588,7 +597,7 @@ La qualité des prompts ne se teste pas avec ces tests unitaires : constituez un
 ### Pile complète en local
 
 ```bash
-cp .env.example .env    # N8N_DOMAIN=localhost, secrets quelconques, vraie ANTHROPIC_API_KEY
+cp .env.example .env    # N8N_DOMAIN=localhost, secrets quelconques, vraie OPENAI_API_KEY
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
 # n8n : https://localhost:8443 (certificat local Caddy), API : http://localhost:8000/docs
 ```
@@ -618,7 +627,7 @@ uv run alembic upgrade head
 | **Nœud « AI Agent » de n8n** pour toute la logique | Difficile à tester et à versionner, et les prompts seraient dispersés dans les workflows. Les appels LLM restent dans l'API. |
 | **Agent autonome** (boucle d'outils libre) | Le déroulé est connu d'avance. Un workflow codé est plus prévisible et moins cher (voir [§ 6.2](#62-pourquoi-deux-appels-et-pas-un-agent-autonome)). |
 | **Langfuse auto-hébergé** pour l'observabilité LLM | La v3 exige ClickHouse, Redis et un stockage objet : trop lourd pour ce volume. La table `llm_calls` couvre le besoin (coûts, latence). À reconsidérer si on veut comparer des prompts à grande échelle. |
-| **Firecrawl / Playwright** pour le scraping | La recherche web côté serveur d'Anthropic suffit pour une note de 300 mots, sans navigateur à maintenir. |
+| **Firecrawl / Playwright** pour le scraping | La recherche web intégrée à l'API OpenAI suffit pour une note de 300 mots, sans navigateur à maintenir. |
 | **SQLAlchemy asynchrone** | Plus complexe pour un gain nul : le temps est passé à attendre le LLM, pas la base. |
 | **Type `ENUM` Postgres** pour les statuts | Chaque ajout de valeur demanderait une migration dédiée. |
 | **Envoi direct par SMTP** | Délivrabilité (warmup, rotation, gestion des rebonds) et désinscription gérées par l'outil d'envoi. |

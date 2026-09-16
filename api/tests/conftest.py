@@ -7,7 +7,7 @@ _db_dir = tempfile.mkdtemp()
 os.environ.update(
     DATABASE_URL=f"sqlite:///{_db_dir}/test.db",
     API_KEY="test-key",
-    ANTHROPIC_API_KEY="unused",
+    OPENAI_API_KEY="unused",
     OPTOUT_SALT="test-salt",
     PLAYBOOK_DIR=str(Path(__file__).parents[2] / "playbook"),
 )
@@ -59,7 +59,7 @@ class FakeLlm:
         return ResearchResult(
             summary="Levée de fonds en 2026.",
             sources=[{"url": "https://example.com/news", "title": "News"}],
-            model="claude-opus-5",
+            model="gpt-5.4-mini",
         )
 
     def qualify_and_draft(self, session, prospect, research):

@@ -7,7 +7,13 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import Session
 
 from prospecting.config import get_settings
-from prospecting.llm.client import check_stop_reason, get_client, record_usage
+from prospecting.llm.client import (
+    LlmTruncated,
+    call_structured,
+    check_response,
+    get_client,
+    record_usage,
+)
 
 INSTRUCTIONS = """\
 Tu classes la réponse d'un prospect à un email de prospection B2B.
@@ -49,13 +55,20 @@ class ReplyClassification(BaseModel):
 def classify_reply(session: Session, prospect_id: int | None, body: str) -> ReplyClassification:
     settings = get_settings()
     started = time.monotonic()
-    response = get_client().messages.parse(
-        model=settings.model_classifier,
-        max_tokens=1024,
-        system=INSTRUCTIONS,
-        messages=[{"role": "user", "content": f"<email>\n{body}\n</email>"}],
-        output_format=ReplyClassification,
+    response = call_structured(
+        lambda: get_client().responses.parse(
+            model=settings.model_classifier,
+            instructions=INSTRUCTIONS,
+            input=f"<email>\n{body}\n</email>",
+            text_format=ReplyClassification,
+            reasoning={"effort": "low"},
+            # Les tokens de raisonnement comptent dans cette limite.
+            max_output_tokens=4000,
+            store=False,
+        )
     )
     record_usage(session, "classify_reply", prospect_id, response, started)
-    check_stop_reason(response)
-    return response.parsed_output
+    check_response(response)
+    if response.output_parsed is None:
+        raise LlmTruncated("réponse structurée absente")
+    return response.output_parsed

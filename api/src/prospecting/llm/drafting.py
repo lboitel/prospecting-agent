@@ -6,7 +6,13 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import Session
 
 from prospecting.config import get_settings
-from prospecting.llm.client import FALLBACK_BETA, check_stop_reason, get_client, record_usage
+from prospecting.llm.client import (
+    LlmTruncated,
+    call_structured,
+    check_response,
+    get_client,
+    record_usage,
+)
 from prospecting.llm.research import describe_prospect
 from prospecting.models import Prospect, Research
 from prospecting.playbook import load_playbook
@@ -44,30 +50,27 @@ class DraftResult(BaseModel):
 def qualify_and_draft(session: Session, prospect: Prospect, research: Research) -> DraftResult:
     settings = get_settings()
     started = time.monotonic()
-    response = get_client().beta.messages.parse(
-        model=settings.model_writer,
-        max_tokens=16000,
-        betas=[FALLBACK_BETA],
-        fallbacks="default",
-        output_config={"effort": "high"},
-        system=[
-            {"type": "text", "text": INSTRUCTIONS},
-            {"type": "text", "text": load_playbook(), "cache_control": {"type": "ephemeral"}},
-        ],
-        messages=[
-            {
-                "role": "user",
-                "content": (
-                    f"<prospect>\n{describe_prospect(prospect)}\n</prospect>\n\n"
-                    f"<recherche>\n{research.summary}\n</recherche>"
-                ),
-            }
-        ],
-        output_format=DraftResult,
+    response = call_structured(
+        lambda: get_client().responses.parse(
+            model=settings.model_writer,
+            instructions=f"{INSTRUCTIONS}\n\n{load_playbook()}",
+            input=(
+                f"<prospect>\n{describe_prospect(prospect)}\n</prospect>\n\n"
+                f"<recherche>\n{research.summary}\n</recherche>"
+            ),
+            text_format=DraftResult,
+            # C'est le texte lu par le prospect : plus de réflexion que pour la recherche.
+            reasoning={"effort": "medium"},
+            max_output_tokens=16000,
+            prompt_cache_key="prospecting-draft",
+            store=False,
+        )
     )
     record_usage(session, "draft", prospect.id, response, started)
-    check_stop_reason(response)
+    check_response(response)
 
-    result = response.parsed_output
+    result = response.output_parsed
+    if result is None:
+        raise LlmTruncated("réponse structurée absente")
     result.score = max(0, min(100, result.score))
     return result

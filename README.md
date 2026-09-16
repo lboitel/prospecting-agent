@@ -1,6 +1,6 @@
 # prospecting-agent
 
-Agent de prospection B2B : n8n pour l'orchestration, une API Python (FastAPI + Claude) pour la recherche, la qualification et la rédaction. Chaque email est validé par un humain avant l'envoi. Les données restent sur le VPS.
+Agent de prospection B2B : n8n pour l'orchestration, une API Python (FastAPI + OpenAI) pour la recherche, la qualification et la rédaction. Chaque email est validé par un humain avant l'envoi. Les données restent sur le VPS.
 
 - **Architecture et choix techniques** : [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 - **Offre, cible, ton** (à remplir) : [playbook/](playbook/)

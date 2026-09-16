@@ -13,12 +13,12 @@ class Settings(BaseSettings):
     # Secret partagé avec n8n (en-tête X-API-Key).
     api_key: SecretStr
 
-    anthropic_api_key: SecretStr
+    openai_api_key: SecretStr
 
-    # Recherche + rédaction : tâches de jugement, modèle le plus capable.
-    model_writer: str = "claude-opus-5"
+    # Recherche web + qualification + rédaction.
+    model_writer: str = "gpt-5.4-mini"
     # Classification des réponses : volume élevé, tâche simple.
-    model_classifier: str = "claude-haiku-4-5"
+    model_classifier: str = "gpt-5.4-nano"
     research_max_searches: int = 5
 
     # Offre, ICP, ton : fichiers éditables sans redéployer le code.

@@ -1,6 +1,6 @@
 import logging
 
-import anthropic
+import openai
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 
@@ -39,8 +39,8 @@ def llm_error_handler(_: Request, exc: Exception) -> JSONResponse:
     return JSONResponse(status_code=502, content={"detail": str(exc)})
 
 
-@app.exception_handler(anthropic.APIError)
-def anthropic_error_handler(_: Request, exc: anthropic.APIError) -> JSONResponse:
+@app.exception_handler(openai.APIError)
+def openai_error_handler(_: Request, exc: openai.APIError) -> JSONResponse:
     # Le SDK a déjà réessayé les erreurs temporaires ; n8n peut relancer plus tard.
-    logging.getLogger(__name__).exception("erreur API Anthropic")
+    logging.getLogger(__name__).exception("erreur API OpenAI")
     return JSONResponse(status_code=503, content={"detail": "service LLM indisponible"})
